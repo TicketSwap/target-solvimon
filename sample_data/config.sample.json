@@ -1,0 +1,27 @@
+{
+  "api_key": "your_api_key_here",
+  "api_url": "https://test.api.solvimon.com",
+  "derive_event_id": false,
+  "event_reference_field": "ticket_reference",
+  "event_timestamp_field": "sold_at",
+  "customer_reference_field": "customer_reference",
+  "meter_reference": "tickets",
+  "meter_properties": [
+    "country",
+    "event_name"
+  ],
+  "meter_values": {
+    "collected_payment": {
+      "amount_field": "collected_payment",
+      "currency_field": "currency"
+    },
+    "collected_payment_counter": {
+      "number": "1"
+    },
+    "service_fee": {
+      "amount_field": "service_fee",
+      "currency_field": "currency"
+    }
+  },
+  "extra_fields": "ignore"
+}

@@ -1,0 +1,179 @@
+send_anonymous_usage_stats: true
+project_id: "target-solvimon"
+default_environment: test
+requires_meltano: ">=4.0"
+environments:
+- name: test
+plugins:
+  extractors:
+  # Replays the sample ticket file, so the target can be exercised end to end.
+  - name: tap-singer-jsonl
+    variant: kgpayne
+    # The tap pins singer-sdk 0.16, which only runs on Python 3.10/3.11 and imports
+    # `pkg_resources`, dropped by setuptools 81.
+    pip_url: tap-singer-jsonl setuptools==80.9.0
+    python: "3.11"
+    config:
+      source: local
+      add_record_metadata: false
+      local:
+        # `local.paths` is broken in the tap's 0.1.0 release, so point it at the
+        # folder instead: it picks up the `*.singer*` files in there.
+        folders:
+        - sample_data
+
+  - name: tap-smoke-test
+    variant: meltano
+    pip_url: git+https://github.com/meltano/tap-smoke-test.git
+    config:
+      streams:
+      - stream_name: animals
+        input_filename: https://raw.githubusercontent.com/meltano/tap-smoke-test/main/demo-data/animals-data.jsonl
+
+  loaders:
+  - name: "target-solvimon"
+    namespace: "target_solvimon"
+    pip_url: -e .
+    capabilities:
+    - about
+    - stream-maps
+    - schema-flattening
+    - structured-logging
+
+    settings:
+    - name: api_key
+      kind: string
+      label: API Key
+      description: Solvimon API key, sent as the `X-API-KEY` header. Needs the `METER_DATA.INGEST` permission.
+      sensitive: true
+
+    - name: api_url
+      kind: string
+      label: API URL
+      description: Base URL of the Solvimon API. Defaults to the test environment; use `https://api.solvimon.com` to write billable events.
+      value: https://test.api.solvimon.com
+
+    - name: api_version
+      kind: options
+      label: Ingest API Version
+      description: Version of the batch ingest endpoint to call. `v1` posts `meter_datas` to `/v1/events/ingest-batch`; `v2` posts `events` to `/v2/events/ingest-batch`, which is documented but currently answers 404.
+      value: v1
+      options:
+      - label: v1
+        value: v1
+      - label: v2
+        value: v2
+
+    - name: auth_token
+      kind: string
+      label: Auth Token
+      description: Bearer token sent as the `Authorization` header, for deployments that require it on top of the API key.
+      sensitive: true
+
+    - name: platform_id
+      kind: string
+      label: Platform ID
+      description: Solvimon platform ID, sent as the `x-platform-id` header.
+
+    - name: timeout
+      kind: integer
+      label: Request Timeout
+      description: Timeout of a single ingest request, in seconds.
+      value: 60
+
+    - name: max_retries
+      kind: integer
+      label: Max Retries
+      description: How often to retry an ingest request that failed with a rate limit, a timeout or a 5xx response.
+      value: 5
+
+    - name: backoff_factor
+      # Seconds rather than a `decimal` kind: Meltano cannot serialize a decimal
+      # setting value into the plugin config file it writes.
+      kind: integer
+      label: Backoff Factor
+      description: Exponential backoff factor between retries, in seconds.
+      value: 2
+
+    - name: derive_event_id
+      kind: boolean
+      label: Derive Event ID
+      description: Whether to derive an event `id` for records that have no `event_id_field`. Turn this off to leave `id` out entirely and let Solvimon identify events by their `reference`.
+      value: true
+
+    - name: event_id_field
+      kind: string
+      label: Event ID Field
+      description: Record field holding the event `id`. Records without it get an id derived from their key properties, so replays stay idempotent.
+      value: id
+
+    - name: event_reference_field
+      kind: string
+      label: Event Reference Field
+      description: Record field holding the event `reference`. Records without it fall back to the stream name.
+      value: reference
+
+    - name: event_reference
+      kind: string
+      label: Event Reference
+      description: Static event `reference` applied to every record, overriding `event_reference_field`.
+
+    - name: event_timestamp_field
+      kind: string
+      label: Event Timestamp Field
+      description: Record field holding the event `timestamp`. Records without it fall back to `_sdc_extracted_at`, then to the time of ingestion.
+      value: timestamp
+
+    - name: meter_reference
+      kind: string
+      label: Meter Reference
+      description: Reference of the Solvimon meter every event belongs to, added to each event. Leave unset for records that carry their own `meter_reference`.
+
+    - name: meter_properties
+      kind: array
+      label: Meter Properties
+      description: Record fields to send as meter properties, either as a list of field names or as a mapping of property reference to record field.
+
+    - name: meter_values
+      kind: object
+      label: Meter Values
+      description: Meter values to build per record, keyed by the value reference in Solvimon. Each entry takes exactly one of `amount_field` (with `currency_field` or `currency`), `number`, `number_field`, `count` or `count_field`.
+
+    - name: extra_fields
+      kind: options
+      label: Extra Fields Handling
+      description: What to do with record fields that are not mapped to `id`, `reference` or `timestamp`.
+      value: passthrough
+      options:
+      - label: Passthrough
+        value: passthrough
+      - label: Meter properties
+        value: meter_properties
+      - label: Ignore
+        value: ignore
+
+    settings_group_validation:
+    - [api_key]
+
+    # Maps the flat ticket columns onto Solvimon events. Point these settings at
+    # your own tap's column names to load real data.
+    config:
+      derive_event_id: false
+      event_reference_field: ticket_reference
+      event_timestamp_field: sold_at
+      customer_reference_field: customer_reference
+      meter_reference: tickets
+      meter_properties:
+      - country
+      - event_name
+      meter_values:
+        collected_payment:
+          amount_field: collected_payment
+          currency_field: currency
+        collected_payment_counter:
+          number: "1"
+        service_fee:
+          amount_field: service_fee
+          currency_field: currency
+      # Every remaining column is already mapped above, so drop the rest.
+      extra_fields: ignore
