@@ -30,10 +30,8 @@ INGEST_BATCH_PATHS = {
 }
 INGEST_BATCH_KEYS = {"v1": "meter_datas", "v2": "events"}
 
-# Events the endpoint accepts per call. The v1 batch endpoint tops out far below the
-# 1000 the v2 docs describe, and neither limit is discoverable, so `max_events_per_request`
-# overrides these when Solvimon changes them.
-MAX_EVENTS_PER_REQUEST = {"v1": 50, "v2": 1000}
+# Hard limit enforced by the high-throughput ingest service.
+MAX_EVENTS_PER_REQUEST = 1000
 
 DEFAULT_TIMEOUT = 60
 DEFAULT_MAX_RETRIES = 5
@@ -59,7 +57,6 @@ class SolvimonClient:
         api_version: str = DEFAULT_API_VERSION,
         auth_token: str | None = None,
         platform_id: str | None = None,
-        max_events_per_request: int | None = None,
         timeout: int = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         backoff_factor: int = DEFAULT_BACKOFF_FACTOR,
@@ -71,8 +68,6 @@ class SolvimonClient:
             api_key: Value of the ``X-API-KEY`` header.
             api_url: Base URL of the Solvimon API (test or live environment).
             api_version: Version of the batch ingest endpoint to call.
-            max_events_per_request: Events to send per call, defaulting to the
-                endpoint's own limit.
             auth_token: Optional bearer token for the ``Authorization`` header.
             platform_id: Optional value of the ``x-platform-id`` header.
             timeout: Per-request timeout in seconds.
@@ -83,7 +78,6 @@ class SolvimonClient:
         self.api_url = api_url.rstrip("/")
         self.api_version = api_version
         self.events_key = INGEST_BATCH_KEYS[api_version]
-        self.max_events_per_request = max_events_per_request or MAX_EVENTS_PER_REQUEST[api_version]
         self.timeout = timeout
 
         headers = {
@@ -126,7 +120,7 @@ class SolvimonClient:
         """Send one batch of events to the ingest endpoint.
 
         Args:
-            events: At most :attr:`max_events_per_request` event objects.
+            events: At most :data:`MAX_EVENTS_PER_REQUEST` event objects.
 
         Returns:
             The decoded API response, or an empty dict if the body was not JSON.
@@ -136,10 +130,10 @@ class SolvimonClient:
             FatalAPIError: If the API rejected the batch, or kept failing after all
                 retries were exhausted.
         """
-        if len(events) > self.max_events_per_request:
+        if len(events) > MAX_EVENTS_PER_REQUEST:
             msg = (
-                f"Cannot ingest {len(events)} events in a single request; this endpoint "
-                f"accepts at most {self.max_events_per_request}"
+                f"Cannot ingest {len(events)} events in a single request; the Solvimon "
+                f"API accepts at most {MAX_EVENTS_PER_REQUEST}"
             )
             raise ValueError(msg)
 

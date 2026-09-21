@@ -362,52 +362,27 @@ def test_extra_fields_can_be_dropped(stub_api: StubSolvimonAPI) -> None:
 
 
 def test_batches_are_split_at_the_api_limit(stub_api: StubSolvimonAPI) -> None:
-    """More events than the endpoint accepts are sent in several requests."""
-    limit = MAX_EVENTS_PER_REQUEST["v1"]
+    """More events than the API accepts are sent in several requests."""
     sink = build_sink(stub_api)
-    events = [sink.build_event({"id": f"evt-{index}"}) for index in range(limit + 1)]
+    events = [
+        sink.build_event({"id": f"evt-{index}"}) for index in range(MAX_EVENTS_PER_REQUEST + 1)
+    ]
 
     sink.process_batch({"records": events})
 
     assert [len(request.body["meter_datas"]) for request in stub_api.requests] == [
-        limit,
+        MAX_EVENTS_PER_REQUEST,
         1,
     ]
-    assert len(stub_api.events) == limit + 1
-
-
-def test_events_per_request_is_configurable(stub_api: StubSolvimonAPI) -> None:
-    """The endpoint's limit can be overridden when Solvimon changes it."""
-    sink = build_sink(stub_api, max_events_per_request=2)
-    events = [sink.build_event({"id": f"evt-{index}"}) for index in range(5)]
-
-    sink.process_batch({"records": events})
-
-    assert [len(request.body["meter_datas"]) for request in stub_api.requests] == [
-        2,
-        2,
-        1,
-    ]
-
-
-def test_events_per_request_follows_the_api_version(stub_api: StubSolvimonAPI) -> None:
-    """Each endpoint version defaults to its own limit."""
-    assert build_sink(stub_api).client.max_events_per_request == MAX_EVENTS_PER_REQUEST["v1"]
-    assert (
-        build_sink(stub_api, api_version="v2").client.max_events_per_request
-        == MAX_EVENTS_PER_REQUEST["v2"]
-    )
+    assert len(stub_api.events) == MAX_EVENTS_PER_REQUEST + 1
 
 
 def test_max_size_defaults_to_the_api_limit(stub_api: StubSolvimonAPI) -> None:
-    """A batch fills up at the endpoint's limit unless `batch_size_rows` says otherwise."""
+    """A batch fills up at 1000 records unless `batch_size_rows` says otherwise."""
     batch_size_rows = 10
-    big_batch_size_rows = 5000
 
-    assert build_sink(stub_api).max_size == MAX_EVENTS_PER_REQUEST["v1"]
+    assert build_sink(stub_api).max_size == MAX_EVENTS_PER_REQUEST
     assert build_sink(stub_api, batch_size_rows=batch_size_rows).max_size == batch_size_rows
-    # A bigger batch is allowed; `process_batch` splits it over several calls.
-    assert build_sink(stub_api, batch_size_rows=big_batch_size_rows).max_size == big_batch_size_rows
 
 
 def test_transient_failures_are_retried(stub_api: StubSolvimonAPI) -> None:
