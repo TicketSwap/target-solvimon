@@ -3,7 +3,7 @@
 `target-solvimon` is a Singer target for [Solvimon](https://solvimon.com).
 
 It loads records into Solvimon as metering events through the batch ingest endpoint,
-in batches of up to 1000 events per call.
+in batches of up to 50 events per call.
 
 The target posts to `POST /v1/events/ingest-batch` with the events under a
 `meter_datas` key, and Solvimon answers `201` echoing the created meter data. The
@@ -16,6 +16,8 @@ What the API enforces, beyond the event shape:
 
 - **A customer per event.** Without a resolvable `customer_reference` the batch fails
   with `RESOURCES_NOT_FOUND: The requested CUSTOMER could not be found`.
+- **At most 50 events per call** on `v1`: a bigger batch is rejected whole with
+  `value holds too many items (51, maximum allowed: 50)`.
 - **A reference of at least 10 characters.**
 - **Timestamps at most 30 minutes in the future.**
 - **Meter properties and values must match the meter**, including the allowed values
@@ -39,6 +41,7 @@ uv tool install git+https://github.com/ticketswap/target-solvimon.git@main
 |:--------|:--------:|:-------:|:------------|
 | api_key | True | None | Solvimon API key, sent as the `X-API-KEY` header. Needs the `METER_DATA.INGEST` permission. |
 | api_version | False | `v1` | Batch ingest endpoint to call, `v1` or `v2`. |
+| max_events_per_request | False | endpoint limit | Events per ingest call: 50 on `v1`, 1000 on `v2`. |
 | api_url | False | `https://test.api.solvimon.com` | Base URL of the Solvimon API. Defaults to the test environment; use `https://api.solvimon.com` to write billable events. |
 | auth_token | False | None | Bearer token sent as the `Authorization` header, for deployments that require it on top of the API key. |
 | platform_id | False | None | Solvimon platform ID, sent as the `x-platform-id` header. |
@@ -112,9 +115,10 @@ handled according to `extra_fields`:
 
 ### Batching, retries and failures
 
-Records are buffered per stream and sent in batches of at most 1000 events, the limit
-of the ingest endpoint. Setting `batch_size_rows` above 1000 buffers more records but
-still splits them across requests.
+Records are buffered per stream and sent in batches of at most `max_events_per_request`
+events, which defaults to what the endpoint in use accepts: 50 on `v1`, 1000 on `v2`.
+Raise it if Solvimon raises the limit. A larger `batch_size_rows` buffers more records
+but still splits them across requests.
 
 Requests that fail with `408`, `425`, `429` or a `5xx` are retried `max_retries` times
 with exponential backoff, honouring `Retry-After`. Anything else — and anything still
