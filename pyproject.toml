@@ -1,0 +1,143 @@
+[build-system]
+requires = [
+    "hatchling>=1,<2",
+    "hatch-vcs>=0.5",
+]
+build-backend = "hatchling.build"
+
+[project]
+name = "target-solvimon"
+dynamic = ["version"]
+description = "Singer target for Solvimon, built with the Meltano Singer SDK."
+readme = "README.md"
+authors = [{ name = "Tobias Cadee", email = "tobias.cadee@ticketswap.com" }]
+keywords = [
+    "ELT",
+    "Solvimon",
+]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+license = "Apache-2.0"
+license-files = [ "LICENSE" ]
+requires-python = ">=3.10"
+dependencies = [
+    "singer-sdk~=0.54.5",
+    "requests~=2.34.0",
+    # `typing.override` is only available from 3.12 on.
+    "typing-extensions>=4.12; python_version<'3.12'",
+]
+
+[project.optional-dependencies]
+s3 = [
+    "s3fs>=2026.1.0",
+]
+
+[project.scripts]
+# CLI declaration
+target-solvimon = 'target_solvimon.target:TargetSolvimon.cli'
+
+[dependency-groups]
+dev = [
+    { include-group = "test" },
+]
+test = [
+    "pytest>=9",
+    "pytest-github-actions-annotate-failures>=0.4",
+    "singer-sdk[testing]",
+]
+typing = [
+    "mypy>=2.1",
+    "ty>=0.0.41",
+]
+
+[tool.hatch.version]
+fallback-version = "0.1.0.dev0"
+source = "vcs"
+
+[tool.mypy]
+enable_error_code = [
+    "ignore-without-code",
+    "redundant-expr",
+    "truthy-bool",
+]
+warn_redundant_casts = true
+warn_unreachable = true
+warn_unused_configs = true
+warn_unused_ignores = true
+
+[tool.ty.rules]
+missing-override-decorator = "error"
+unused-type-ignore-comment = "ignore"
+
+[tool.pytest]
+addopts = [
+    "-ra",
+]
+filterwarnings = [
+    "error",
+]
+log_level = "INFO"
+minversion = "9"
+strict = true
+testpaths = [
+    "tests",
+]
+
+[tool.ruff]
+line-length = 100
+required-version = ">=0.16.0"
+
+[tool.ruff.lint]
+future-annotations = true
+ignore = [
+    "missing-trailing-comma",
+]
+select = ["ALL"]
+
+[tool.ruff.lint.flake8-annotations]
+allow-star-arg-any = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+  "assert",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+# This configuration can be used to customize tox environments
+[tool.tox]
+requires = [
+    "tox>=4.53",
+    "tox-uv>=1.35",
+]
+env_list = [
+    "typing",
+    { prefix = "3.", start = 10 },
+]
+
+[tool.tox.env_run_base]
+description = "run tests on Python {env_name}"
+runner = "uv-venv-lock-runner"
+pass_env = [
+    "CI",
+    "GITHUB_*",
+    "TARGET_SOLVIMON_*",
+]
+dependency_groups = [ "test" ]
+commands = [ [ "pytest", { replace = "posargs", default = [ "tests" ], extend = true } ] ]
+
+[tool.tox.env.typing]
+description = "type checks"
+dependency_groups = [ "test", "typing" ]
+commands = [
+    [ "mypy", { replace = "posargs", default = [ "target_solvimon", "tests" ], extend = true } ],
+    [ "ty", "check", { replace = "posargs", default = [ "target_solvimon", "tests" ], extend = true } ],
+]
