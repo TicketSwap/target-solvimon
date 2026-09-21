@@ -74,9 +74,7 @@ def test_sample_tickets_become_events(stub_api: StubSolvimonAPI) -> None:
 
     # One batch, since the file holds fewer records than the API limit.
     assert len(stub_api.requests) == 1
-    assert EXAMPLE_EVENT | {"customer_reference": "partner_a"} in (
-        stub_api.events
-    )
+    assert EXAMPLE_EVENT | {"customer_reference": "partner_a"} in stub_api.events
     assert len(stub_api.events) == 5  # ruff: ignore[magic-value-comparison]
     assert all("id" not in event for event in stub_api.events)
     assert {event["meter_reference"] for event in stub_api.events} == {"tickets"}

@@ -18,7 +18,6 @@ from target_solvimon.client import (
     DEFAULT_BACKOFF_FACTOR,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
-    MAX_EVENTS_PER_REQUEST,
     SolvimonClient,
 )
 
@@ -176,10 +175,6 @@ def meter_value_spec_problems(spec: t.Any) -> list[str]:  # ruff: ignore[any-typ
 class SolvimonSink(BatchSink):
     """Solvimon target sink class."""
 
-    # The ingest endpoint accepts at most 1000 events per call, so make that the
-    # natural batch size. Larger `batch_size_rows` values are split on send.
-    MAX_SIZE_DEFAULT = MAX_EVENTS_PER_REQUEST
-
     def __init__(
         self,
         target: Target,
@@ -202,6 +197,7 @@ class SolvimonSink(BatchSink):
             api_key=self.config["api_key"],
             api_url=self.config.get("api_url", DEFAULT_API_URL),
             api_version=self.config.get("api_version", DEFAULT_API_VERSION),
+            max_events_per_request=self.config.get("max_events_per_request"),
             auth_token=self.config.get("auth_token"),
             platform_id=self.config.get("platform_id"),
             timeout=self.config.get("timeout", DEFAULT_TIMEOUT),
@@ -235,6 +231,17 @@ class SolvimonSink(BatchSink):
         self._clobbered_fields: set[str] = set()
         self._warned_timestamp_fallback = False
 
+    @property
+    @override
+    def max_size(self) -> int:
+        """Records to buffer before draining.
+
+        Returns:
+            `batch_size_rows` if set, else what the endpoint takes in one call, so a
+            full batch is one request. A larger value is still split on send.
+        """
+        return self.batch_size_rows or self.client.max_events_per_request
+
     @override
     def process_record(self, record: dict, context: dict) -> None:
         """Convert a record into a Solvimon event and stage it for the batch.
@@ -253,9 +260,10 @@ class SolvimonSink(BatchSink):
             context: Stream partition or context dictionary.
         """
         events: list[dict] = context.get("records", [])
+        per_request = self.client.max_events_per_request
 
-        for start in range(0, len(events), MAX_EVENTS_PER_REQUEST):
-            chunk = events[start : start + MAX_EVENTS_PER_REQUEST]
+        for start in range(0, len(events), per_request):
+            chunk = events[start : start + per_request]
             response = self.client.ingest_events(chunk)
             acknowledged = response.get(self.client.events_key)
             if acknowledged is not None and len(acknowledged) != len(chunk):

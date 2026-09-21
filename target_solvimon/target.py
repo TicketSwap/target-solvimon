@@ -12,6 +12,7 @@ from target_solvimon.client import (
     DEFAULT_BACKOFF_FACTOR,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
+    MAX_EVENTS_PER_REQUEST,
 )
 from target_solvimon.sinks import (
     AMOUNT_FIELD,
@@ -76,6 +77,15 @@ class TargetSolvimon(Target):
             th.StringType(nullable=True),
             title="Platform ID",
             description="Solvimon platform ID, sent as the `x-platform-id` header.",
+        ),
+        th.Property(
+            "max_events_per_request",
+            th.IntegerType(nullable=True),
+            title="Max Events Per Request",
+            description="Events to send in one ingest call. Defaults to the limit of "
+            f"the endpoint in use: {MAX_EVENTS_PER_REQUEST['v1']} for `v1`, "
+            f"{MAX_EVENTS_PER_REQUEST['v2']} for `v2`. Larger batches are split over "
+            "several calls.",
         ),
         th.Property(
             "timeout",

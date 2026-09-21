@@ -75,6 +75,11 @@ plugins:
       label: Platform ID
       description: Solvimon platform ID, sent as the `x-platform-id` header.
 
+    - name: max_events_per_request
+      kind: integer
+      label: Max Events Per Request
+      description: Events to send in one ingest call. Defaults to the limit of the endpoint in use, 50 for `v1` and 1000 for `v2`. Larger batches are split over several calls.
+
     - name: timeout
       kind: integer
       label: Request Timeout
