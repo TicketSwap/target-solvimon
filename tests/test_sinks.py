@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import logging
 import typing as t
 
@@ -97,7 +97,7 @@ def test_record_maps_onto_the_event_shape(stub_api: StubSolvimonAPI) -> None:
     record = {
         "id": "evt-1",
         "reference": "ticket_sold",
-        "timestamp": datetime.datetime(2026, 9, 21, 12, 30, tzinfo=datetime.timezone.utc),
+        "timestamp": dt.datetime(2026, 9, 21, 12, 30, tzinfo=dt.UTC),
         "customer_reference": "cus-1",
         "quantity": 2,
     }
@@ -129,7 +129,7 @@ def test_v2_posts_events_to_the_v2_endpoint(stub_api: StubSolvimonAPI) -> None:
 
 def test_credentials_are_sent_as_headers(stub_api: StubSolvimonAPI) -> None:
     """The API key, bearer token and platform id all reach the API."""
-    sink = build_sink(stub_api, auth_token="tok-1", platform_id="plat-1")  # ruff: ignore[hardcoded-password-func-arg]
+    sink = build_sink(stub_api, auth_token="tok-1", platform_id="plat-1")
 
     sink.process_batch({"records": [sink.build_event({"id": "evt-1"})]})
 
@@ -183,11 +183,13 @@ def test_field_names_are_configurable(stub_api: StubSolvimonAPI) -> None:
         event_reference="ticket_sold",
     )
 
-    event = sink.build_event({
-        "sale_id": "sale-1",
-        "sold_at": 1758456600,
-        "reference": "ignored-by-the-static-reference",
-    })
+    event = sink.build_event(
+        {
+            "sale_id": "sale-1",
+            "sold_at": 1758456600,
+            "reference": "ignored-by-the-static-reference",
+        }
+    )
 
     assert event["id"] == "sale-1"
     assert event["reference"] == "ticket_sold"
@@ -198,13 +200,15 @@ def test_extra_fields_as_meter_properties(stub_api: StubSolvimonAPI) -> None:
     """Unmapped fields can be turned into meter properties."""
     sink = build_sink(stub_api, extra_fields="meter_properties")
 
-    event = sink.build_event({
-        "id": "evt-1",
-        "customer_reference": "cus-1",
-        "seat": "A12",
-        "quantity": 2,
-        "empty": None,
-    })
+    event = sink.build_event(
+        {
+            "id": "evt-1",
+            "customer_reference": "cus-1",
+            "seat": "A12",
+            "quantity": 2,
+            "empty": None,
+        }
+    )
 
     # The customer is an event field of its own, not a meter property.
     assert event["customer_reference"] == "cus-1"
@@ -232,12 +236,14 @@ def test_meter_properties_and_values_are_built_from_flat_fields(
         extra_fields="ignore",
     )
 
-    event = sink.build_event({
-        "id": "evt-1",
-        "country": "NL",
-        "currency": "EUR",
-        "gross_amount": "12.50",
-    })
+    event = sink.build_event(
+        {
+            "id": "evt-1",
+            "country": "NL",
+            "currency": "EUR",
+            "gross_amount": "12.50",
+        }
+    )
 
     assert event["meter_reference"] == "tickets"
     assert event["meter_properties"] == [{"reference": "country", "value": "NL"}]
@@ -271,12 +277,14 @@ def test_mapped_fields_are_not_also_sent_as_extras(stub_api: StubSolvimonAPI) ->
         meter_values={"fee": {"amount_field": "fee", "currency": "EUR"}},
     )
 
-    event = sink.build_event({
-        "id": "evt-1",
-        "country": "NL",
-        "fee": "1.50",
-        "seat": "A12",
-    })
+    event = sink.build_event(
+        {
+            "id": "evt-1",
+            "country": "NL",
+            "fee": "1.50",
+            "seat": "A12",
+        }
+    )
 
     # `country` and `fee` were mapped; only `seat` is left to pass through.
     assert event["seat"] == "A12"
@@ -337,14 +345,18 @@ def test_misspelled_meter_value_keys_fail_on_startup(
 
 def test_customer_can_be_set_for_every_record(stub_api: StubSolvimonAPI) -> None:
     """A static customer reference overrides the record field."""
-    from_record = build_sink(stub_api).build_event({
-        "id": "evt-1",
-        "customer_reference": "cus-1",
-    })
-    static = build_sink(stub_api, customer_reference="cus-2").build_event({
-        "id": "evt-1",
-        "customer_reference": "cus-1",
-    })
+    from_record = build_sink(stub_api).build_event(
+        {
+            "id": "evt-1",
+            "customer_reference": "cus-1",
+        }
+    )
+    static = build_sink(stub_api, customer_reference="cus-2").build_event(
+        {
+            "id": "evt-1",
+            "customer_reference": "cus-1",
+        }
+    )
 
     assert from_record["customer_reference"] == "cus-1"
     assert static["customer_reference"] == "cus-2"

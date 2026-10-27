@@ -48,7 +48,7 @@ ERROR_BODY_MAX_CHARS = 1000
 class SolvimonClient:
     """Thin ``requests`` wrapper around the Solvimon event ingest API."""
 
-    def __init__(  # ruff: ignore[too-many-arguments]
+    def __init__(  # noqa: PLR0913
         self,
         *,
         logger: logging.Logger,
