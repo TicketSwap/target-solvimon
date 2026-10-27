@@ -34,3 +34,14 @@ updates:
           - "*"
     cooldown:
       default-days: 7
+
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      pre-commit:
+        patterns: ["*"]
+    commit-message:
+      prefix: 'chore(deps): '
+      prefix-development: 'chore(deps-dev): '
