@@ -165,12 +165,14 @@ class TargetSolvimon(Target):
         ),
         th.Property(
             "meter_properties",
-            th.CustomType({
-                "oneOf": [
-                    {"type": "array", "items": {"type": "string"}},
-                    {"type": "object", "additionalProperties": {"type": "string"}},
-                ],
-            }),
+            th.CustomType(
+                {
+                    "oneOf": [
+                        {"type": "array", "items": {"type": "string"}},
+                        {"type": "object", "additionalProperties": {"type": "string"}},
+                    ],
+                }
+            ),
             title="Meter Properties",
             description="Record fields to send as meter properties, either as a list "
             "of field names (`[country, event_name]`) or as a mapping of property "

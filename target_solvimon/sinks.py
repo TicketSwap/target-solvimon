@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import decimal
 import sys
 import typing as t
@@ -48,13 +48,15 @@ AMOUNT_FIELD = "amount_field"
 CURRENCY_FIELD = "currency_field"
 CURRENCY = "currency"
 VALUE_KINDS = ("number", "count")
-METER_VALUE_KEYS = frozenset({
-    AMOUNT_FIELD,
-    CURRENCY_FIELD,
-    CURRENCY,
-    *VALUE_KINDS,
-    *(f"{kind}_field" for kind in VALUE_KINDS),
-})
+METER_VALUE_KEYS = frozenset(
+    {
+        AMOUNT_FIELD,
+        CURRENCY_FIELD,
+        CURRENCY,
+        *VALUE_KINDS,
+        *(f"{kind}_field" for kind in VALUE_KINDS),
+    }
+)
 
 EXTRA_FIELDS_PASSTHROUGH = "passthrough"
 EXTRA_FIELDS_METER_PROPERTIES = "meter_properties"
@@ -62,7 +64,7 @@ EXTRA_FIELDS_IGNORE = "ignore"
 DEFAULT_EXTRA_FIELDS = EXTRA_FIELDS_PASSTHROUGH
 
 
-def to_iso8601(value: t.Any) -> str:  # ruff: ignore[any-type]
+def to_iso8601(value: t.Any) -> str:  # noqa: ANN401
     """Render a record value as an ISO 8601 timestamp string.
 
     Args:
@@ -72,19 +74,19 @@ def to_iso8601(value: t.Any) -> str:  # ruff: ignore[any-type]
     Returns:
         The value as an ISO 8601 string. Naive datetimes are assumed to be UTC.
     """
-    if isinstance(value, datetime.datetime):
+    if isinstance(value, dt.datetime):
         if value.tzinfo is None:
-            value = value.replace(tzinfo=datetime.timezone.utc)
+            value = value.replace(tzinfo=dt.UTC)
         return value.isoformat()
-    if isinstance(value, (datetime.date, datetime.time)):
+    if isinstance(value, (dt.date, dt.time)):
         return value.isoformat()
     if isinstance(value, (int, float, decimal.Decimal)) and not isinstance(value, bool):
-        epoch = datetime.datetime.fromtimestamp(float(value), tz=datetime.timezone.utc)
+        epoch = dt.datetime.fromtimestamp(float(value), tz=dt.UTC)
         return epoch.isoformat()
     return str(value)
 
 
-def to_property_value(value: t.Any) -> str:  # ruff: ignore[any-type]
+def to_property_value(value: t.Any) -> str:  # noqa: ANN401
     """Render a record value as a Solvimon meter property value.
 
     Args:
@@ -97,7 +99,7 @@ def to_property_value(value: t.Any) -> str:  # ruff: ignore[any-type]
         return value
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+    if isinstance(value, (dt.datetime, dt.date, dt.time)):
         return value.isoformat()
     if isinstance(value, (dict, list)):
         return serialize_json(value)
@@ -141,7 +143,7 @@ def build_meter_value(reference: str, spec: dict, record: dict) -> dict | None:
     return None  # pragma: no cover - the spec is validated on startup
 
 
-def meter_value_spec_problems(spec: t.Any) -> list[str]:  # ruff: ignore[any-type]
+def meter_value_spec_problems(spec: t.Any) -> list[str]:  # noqa: ANN401
     """Describe what is wrong with one `meter_values` entry.
 
     Args:
@@ -436,7 +438,7 @@ class SolvimonSink(BatchSink):
             value = record.get(EXTRACTED_AT_FIELD)
         if value is None:
             self.warn_timestamp_fallback()
-            return datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+            return dt.datetime.now(tz=dt.UTC).isoformat()
         return to_iso8601(value)
 
     def derived_event_id(self, record: dict) -> str:

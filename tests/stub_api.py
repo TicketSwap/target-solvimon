@@ -135,13 +135,17 @@ class StubSolvimonAPI:
                 )
 
                 status = stub._next_status()
-                if status >= 400:  # ruff: ignore[magic-value-comparison]
+                if status >= 400:
                     payload = json.dumps(ERROR_BODY).encode()
                 else:
                     key = events_key(body)
-                    payload = json.dumps({
-                        key: [{"reference": event.get("reference")} for event in body.get(key, [])]
-                    }).encode()
+                    payload = json.dumps(
+                        {
+                            key: [
+                                {"reference": event.get("reference")} for event in body.get(key, [])
+                            ]
+                        }
+                    ).encode()
 
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")

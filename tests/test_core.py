@@ -39,7 +39,7 @@ class TestTargetSolvimon(StandardTargetTests):  # type: ignore[misc, valid-type]
 
     @pytest.fixture(scope="class")
     @classmethod
-    def resource(cls):  # ruff:ignore[missing-return-type-class-method]
+    def resource(cls) -> str:
         """Generic external resource.
 
         This fixture is useful for setup and teardown of external resources,
