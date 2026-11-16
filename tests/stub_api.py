@@ -26,6 +26,11 @@ ERROR_BODY = {
     "code": "BAD_REQUEST",
     "message": "stubbed failure",
 }
+MISSING_CUSTOMER_BODY = {
+    "type": "RESOURCES_NOT_FOUND",
+    "code": "NOT_FOUND",
+    "message": "The requested CUSTOMER could not be found",
+}
 
 
 def events_key(body: dict) -> str:
@@ -46,6 +51,7 @@ class StubRequest(t.NamedTuple):
     path: str
     headers: dict[str, str]
     body: dict
+    status: int
 
 
 class StubSolvimonAPI:
@@ -55,6 +61,7 @@ class StubSolvimonAPI:
         """Start the server on a random port of the loopback interface."""
         self.requests: list[StubRequest] = []
         self._statuses: list[int] = []
+        self._rejected_ids: set[str] = set()
         self._lock = threading.Lock()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._build_handler())
         self._thread = threading.Thread(
@@ -85,11 +92,35 @@ class StubSolvimonAPI:
             event for request in self.requests for event in request.body[events_key(request.body)]
         ]
 
+    @property
+    def ingested_events(self) -> list[dict]:
+        """Every event of the requests the stub accepted.
+
+        Returns:
+            The flattened list of accepted events.
+        """
+        return [
+            event
+            for request in self.requests
+            if request.status < 400
+            for event in request.body[events_key(request.body)]
+        ]
+
     def reset(self) -> None:
-        """Forget captured requests and queued statuses, for reuse across tests."""
+        """Forget captured requests, queued statuses and rejected ids."""
         with self._lock:
             self.requests.clear()
             self._statuses.clear()
+            self._rejected_ids.clear()
+
+    def reject_events(self, *event_ids: str) -> None:
+        """Answer 404 for a missing customer to every request carrying these ids.
+
+        Args:
+            event_ids: Ids of the events to refuse.
+        """
+        with self._lock:
+            self._rejected_ids.update(event_ids)
 
     def queue_statuses(self, *statuses: int) -> None:
         """Respond with these status codes before falling back to 200.
@@ -106,9 +137,11 @@ class StubSolvimonAPI:
         self._server.server_close()
         self._thread.join(timeout=5)
 
-    def _next_status(self) -> int:
+    def _response_for(self, events: list[dict]) -> tuple[int, dict]:
         with self._lock:
-            return self._statuses.pop(0) if self._statuses else 200
+            if any(event.get("id") in self._rejected_ids for event in events):
+                return 404, MISSING_CUSTOMER_BODY
+            return (self._statuses.pop(0) if self._statuses else 200), ERROR_BODY
 
     def _record(self, request: StubRequest) -> None:
         with self._lock:
@@ -126,17 +159,18 @@ class StubSolvimonAPI:
                 """Capture the request and answer with the queued status."""
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
+                status, error_body = stub._response_for(body.get(events_key(body), []))
                 stub._record(
                     StubRequest(
                         path=self.path,
                         headers=dict(self.headers),
                         body=body,
+                        status=status,
                     )
                 )
 
-                status = stub._next_status()
                 if status >= 400:
-                    payload = json.dumps(ERROR_BODY).encode()
+                    payload = json.dumps(error_body).encode()
                 else:
                     key = events_key(body)
                     payload = json.dumps(

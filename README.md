@@ -14,8 +14,8 @@ endpoint the docs describe — same events, under an `events` key — currently 
 
 What the API enforces, beyond the event shape:
 
-- **A customer per event.** Without a resolvable `customer_reference` the batch fails
-  with `RESOURCES_NOT_FOUND: The requested CUSTOMER could not be found`.
+- **A customer per event.** Without a resolvable `customer_reference` the event is
+  rejected with `RESOURCES_NOT_FOUND: The requested CUSTOMER could not be found`.
 - **A reference of at least 10 characters.**
 - **Timestamps at most 30 minutes in the future.**
 - **Meter properties and values must match the meter**, including the allowed values
@@ -117,9 +117,12 @@ of the ingest endpoint. Setting `batch_size_rows` above 1000 buffers more record
 still splits them across requests.
 
 Requests that fail with `408`, `425`, `429` or a `5xx` are retried `max_retries` times
-with exponential backoff, honouring `Retry-After`. Anything else — and anything still
-failing once the retries are used up — fails the sync with the status code and the API
-error body, rather than silently dropping events.
+with exponential backoff, honouring `Retry-After`. A batch refused with `400`, `409`,
+`413`, `422`, or a `404` naming `RESOURCES_NOT_FOUND`, is split in half and resent until
+the refused events are isolated: each is skipped with a warning carrying the API error and
+the event, and the rest is ingested. Anything else — auth errors, an unknown endpoint, and
+anything still failing once the retries are used up — fails the sync with the status code
+and the API error body.
 
 ### Configure using environment variables
 
