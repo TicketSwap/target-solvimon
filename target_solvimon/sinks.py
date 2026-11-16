@@ -59,6 +59,10 @@ METER_VALUE_KEYS = frozenset(
     }
 )
 
+ACTION_CREATE = "create"
+ACTION_REPLACE = "replace"
+REPLACE_REFERENCES = "replace_references"
+
 EXTRA_FIELDS_PASSTHROUGH = "passthrough"
 EXTRA_FIELDS_METER_PROPERTIES = "meter_properties"
 EXTRA_FIELDS_IGNORE = "ignore"
@@ -229,6 +233,7 @@ class SolvimonSink(BatchSink):
         self.static_customer_reference: str | None = self.config.get("customer_reference")
         self.static_reference: str | None = self.config.get("event_reference")
         self.extra_fields: str = self.config.get("extra_fields", DEFAULT_EXTRA_FIELDS)
+        self.action_field: str | None = self.config.get("action_field")
 
         self.meter_reference: str | None = self.config.get("meter_reference")
         self.property_fields: dict[str, str] = self.parse_meter_properties()
@@ -246,19 +251,55 @@ class SolvimonSink(BatchSink):
             record: Individual record in the stream.
             context: Stream partition or context dictionary.
         """
-        context.setdefault("records", []).append(self.build_event(record))
+        event = self.build_event(record)
+        context.setdefault("records", []).append(event)
+        if self.is_replace(record):
+            context.setdefault(REPLACE_REFERENCES, set()).add(event["reference"])
 
     @override
     def process_batch(self, context: dict) -> None:
         """Send the staged events to the Solvimon ingest endpoint.
 
+        Each chunk first deletes the live event of its `replace` records, so their
+        reference is free to be ingested again with the new values.
+
         Args:
             context: Stream partition or context dictionary.
         """
         events: list[dict] = context.get("records", [])
+        replaces: set[str] = context.get(REPLACE_REFERENCES, set())
 
         for start in range(0, len(events), MAX_EVENTS_PER_REQUEST):
-            self.ingest(events[start : start + MAX_EVENTS_PER_REQUEST])
+            chunk = events[start : start + MAX_EVENTS_PER_REQUEST]
+            for reference in (event["reference"] for event in chunk):
+                if reference in replaces and not self.client.delete_event(reference):
+                    self.logger.debug("No live event '%s' to replace", reference)
+            self.ingest(chunk)
+
+    def is_replace(self, record: dict) -> bool:
+        """Return whether a record replaces the event Solvimon holds for its reference.
+
+        Args:
+            record: Individual record in the stream.
+
+        Returns:
+            True for a `replace` action. Records without `action_field`, or without a
+            value in it, are created.
+
+        Raises:
+            ValueError: If the action is neither `create` nor `replace`, rather than
+                guess whether an event should be overwritten.
+        """
+        action = record.get(self.action_field) if self.action_field else None
+        if action in (None, ACTION_CREATE):
+            return False
+        if action == ACTION_REPLACE:
+            return True
+        msg = (
+            f"Record of stream '{self.stream_name}' has {self.action_field}={action!r}; "
+            f"expected '{ACTION_CREATE}' or '{ACTION_REPLACE}'"
+        )
+        raise ValueError(msg)
 
     def ingest(self, events: list[dict]) -> None:
         """Send events, skipping only the ones Solvimon refuses.
@@ -540,6 +581,8 @@ class SolvimonSink(BatchSink):
             self.timestamp_field,
             self.customer_reference_field,
         }
+        if self.action_field:
+            consumed.add(self.action_field)
         consumed.update(self.property_fields.values())
         for spec in self.value_specs.values():
             consumed.update(value for key, value in spec.items() if key.endswith("_field"))

@@ -19,12 +19,18 @@ else:
 
 INGEST_PATH = "/v1/events/ingest-batch"
 INGEST_PATH_V2 = "/v2/events/ingest-batch"
+DELETE_PATH = "/v1/ingest/meter-data/delete"
 EVENTS_KEYS = ("meter_datas", "events")
 
 ERROR_BODY = {
     "type": "INVALID_REQUEST",
     "code": "BAD_REQUEST",
     "message": "stubbed failure",
+}
+MISSING_EVENT_BODY = {
+    "type": "INVALID_REQUEST",
+    "code": "RESOURCE_NOT_FOUND",
+    "message": "The requested resource was not found",
 }
 MISSING_CUSTOMER_BODY = {
     "type": "RESOURCES_NOT_FOUND",
@@ -62,6 +68,7 @@ class StubSolvimonAPI:
         self.requests: list[StubRequest] = []
         self._statuses: list[int] = []
         self._rejected_ids: set[str] = set()
+        self._missing_references: set[str] = set()
         self._lock = threading.Lock()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._build_handler())
         self._thread = threading.Thread(
@@ -89,7 +96,10 @@ class StubSolvimonAPI:
             The flattened list of ingested events.
         """
         return [
-            event for request in self.requests for event in request.body[events_key(request.body)]
+            event
+            for request in self.requests
+            if request.path != DELETE_PATH
+            for event in request.body[events_key(request.body)]
         ]
 
     @property
@@ -102,7 +112,7 @@ class StubSolvimonAPI:
         return [
             event
             for request in self.requests
-            if request.status < 400
+            if request.path != DELETE_PATH and request.status < 400
             for event in request.body[events_key(request.body)]
         ]
 
@@ -112,6 +122,27 @@ class StubSolvimonAPI:
             self.requests.clear()
             self._statuses.clear()
             self._rejected_ids.clear()
+            self._missing_references.clear()
+
+    @property
+    def deleted_references(self) -> list[str]:
+        """References of every delete request, in order.
+
+        Returns:
+            The references the target asked to delete.
+        """
+        return [
+            request.body["reference"] for request in self.requests if request.path == DELETE_PATH
+        ]
+
+    def miss_references(self, *references: str) -> None:
+        """Answer deletes of these references as if they have no live event.
+
+        Args:
+            references: References to report as not found.
+        """
+        with self._lock:
+            self._missing_references.update(references)
 
     def reject_events(self, *event_ids: str) -> None:
         """Answer 404 for a missing customer to every request carrying these ids.
@@ -137,8 +168,13 @@ class StubSolvimonAPI:
         self._server.server_close()
         self._thread.join(timeout=5)
 
-    def _response_for(self, events: list[dict]) -> tuple[int, dict]:
+    def _response_for(self, path: str, body: dict) -> tuple[int, dict]:
         with self._lock:
+            if path == DELETE_PATH:
+                if body.get("reference") in self._missing_references:
+                    return 404, MISSING_EVENT_BODY
+                return 200, {}
+            events = body.get(events_key(body), [])
             if any(event.get("id") in self._rejected_ids for event in events):
                 return 404, MISSING_CUSTOMER_BODY
             return (self._statuses.pop(0) if self._statuses else 200), ERROR_BODY
@@ -159,7 +195,7 @@ class StubSolvimonAPI:
                 """Capture the request and answer with the queued status."""
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
-                status, error_body = stub._response_for(body.get(events_key(body), []))
+                status, error_body = stub._response_for(self.path, body)
                 stub._record(
                     StubRequest(
                         path=self.path,
@@ -169,7 +205,7 @@ class StubSolvimonAPI:
                     )
                 )
 
-                if status >= 400:
+                if status >= 400 or self.path == DELETE_PATH:
                     payload = json.dumps(error_body).encode()
                 else:
                     key = events_key(body)

@@ -30,6 +30,8 @@ INGEST_BATCH_PATHS = {
     "v2": "/v2/events/ingest-batch",
 }
 INGEST_BATCH_KEYS = {"v1": "meter_datas", "v2": "events"}
+# Soft-deletes the event with a reference, so the reference can be ingested again.
+DELETE_EVENT_PATH = "/v1/ingest/meter-data/delete"
 
 # Hard limit enforced by the high-throughput ingest service.
 MAX_EVENTS_PER_REQUEST = 1000
@@ -44,6 +46,8 @@ RETRYABLE_STATUS_CODES = (408, 425, 429, 500, 502, 503, 504)
 
 REJECTED_EVENTS_STATUS_CODES = (400, 409, 413, 422)
 MISSING_RESOURCE_ERROR = "RESOURCES_NOT_FOUND"
+# How the delete endpoint reports a reference without a live event.
+MISSING_EVENT_ERROR = "RESOURCE_NOT_FOUND"
 
 # API error bodies are small, but a proxy may return a full HTML page.
 ERROR_BODY_MAX_CHARS = 1000
@@ -175,6 +179,35 @@ class SolvimonClient:
                 response.status_code,
             )
             return {}
+
+    def delete_event(self, reference: str) -> bool:
+        """Soft-delete the live event with a reference.
+
+        Args:
+            reference: Reference of the event to delete.
+
+        Returns:
+            True if an event was deleted, False if the reference had no live event.
+
+        Raises:
+            FatalAPIError: If the API refused the delete, or kept failing after all
+                retries were exhausted.
+        """
+        response = self.session.post(
+            f"{self.api_url}{DELETE_EVENT_PATH}",
+            data=serialize_json({"reference": reference}).encode(),
+            timeout=self.timeout,
+        )
+        if response.status_code == HTTPStatus.NOT_FOUND and MISSING_EVENT_ERROR in response.text:
+            return False
+        if not response.ok:
+            detail = response.text[:ERROR_BODY_MAX_CHARS].strip()
+            msg = (
+                f"Solvimon refused to delete event '{reference}': "
+                f"{response.status_code} {response.reason}: {detail}"
+            )
+            raise FatalAPIError(msg)
+        return True
 
     def close(self) -> None:
         """Release the underlying HTTP connection pool."""

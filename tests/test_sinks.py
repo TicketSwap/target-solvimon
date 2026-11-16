@@ -12,7 +12,7 @@ from singer_sdk.exceptions import ConfigValidationError, FatalAPIError
 from target_solvimon.client import MAX_EVENTS_PER_REQUEST
 from target_solvimon.sinks import SolvimonSink
 from target_solvimon.target import TargetSolvimon
-from tests.stub_api import INGEST_PATH, INGEST_PATH_V2, StubSolvimonAPI
+from tests.stub_api import DELETE_PATH, INGEST_PATH, INGEST_PATH_V2, StubSolvimonAPI
 
 if t.TYPE_CHECKING:
     from collections.abc import Iterator
@@ -89,6 +89,19 @@ def build_sink(
         schema=SCHEMA,
         key_properties=key_properties or ["id"],
     )
+
+
+def send(sink: SolvimonSink, records: list[dict]) -> None:
+    """Stage records the way the SDK does, then send them as one batch.
+
+    Args:
+        sink: The sink to send through.
+        records: Records of the batch.
+    """
+    context: dict = {}
+    for record in records:
+        sink.process_record(record, context)
+    sink.process_batch(context)
 
 
 def test_record_maps_onto_the_event_shape(stub_api: StubSolvimonAPI) -> None:
@@ -464,3 +477,69 @@ def test_timestamp_fallback_is_reported_once(
 
     warnings = [record for record in caplog.records if "ingestion" in record.message]
     assert len(warnings) == 1
+
+
+def test_creates_send_no_deletes_and_drop_the_action(stub_api: StubSolvimonAPI) -> None:
+    """`create` records are only ingested, and the action field never reaches Solvimon."""
+    sink = build_sink(stub_api, action_field="action")
+
+    send(sink, [{"id": "evt-1", "action": "create"}, {"id": "evt-2"}])
+
+    assert stub_api.deleted_references == []
+    assert [event["id"] for event in stub_api.events] == ["evt-1", "evt-2"]
+    assert all("action" not in event for event in stub_api.events)
+
+
+def test_replace_deletes_the_reference_before_ingesting(stub_api: StubSolvimonAPI) -> None:
+    """A `replace` record deletes the live event with its reference, then ingests it."""
+    sink = build_sink(stub_api, action_field="action")
+
+    send(sink, [{"id": "evt-1", "reference": "ticket_1", "action": "replace"}])
+
+    assert [request.path for request in stub_api.requests] == [DELETE_PATH, INGEST_PATH]
+    assert stub_api.deleted_references == ["ticket_1"]
+    assert stub_api.ingested_events[0]["reference"] == "ticket_1"
+    assert "action" not in stub_api.ingested_events[0]
+
+
+def test_replace_without_a_live_event_is_still_ingested(stub_api: StubSolvimonAPI) -> None:
+    """A delete answered with `RESOURCE_NOT_FOUND` counts as done."""
+    sink = build_sink(stub_api, action_field="action")
+    stub_api.miss_references("ticket_1")
+
+    send(sink, [{"id": "evt-1", "reference": "ticket_1", "action": "replace"}])
+
+    assert stub_api.requests[0].status == 404
+    assert [event["reference"] for event in stub_api.ingested_events] == ["ticket_1"]
+
+
+def test_deletes_of_a_chunk_run_before_its_ingest(stub_api: StubSolvimonAPI) -> None:
+    """A mixed chunk deletes every replaced reference first, then ingests all its events."""
+    sink = build_sink(stub_api, action_field="action")
+    actions = ["create", "replace", "create", "replace"]
+
+    send(
+        sink,
+        [
+            {"id": f"evt-{index}", "reference": f"ticket_{index}", "action": action}
+            for index, action in enumerate(actions)
+        ],
+    )
+
+    assert [request.path for request in stub_api.requests] == [
+        DELETE_PATH,
+        DELETE_PATH,
+        INGEST_PATH,
+    ]
+    assert stub_api.deleted_references == ["ticket_1", "ticket_3"]
+    assert [event["reference"] for event in stub_api.ingested_events] == [
+        f"ticket_{index}" for index in range(len(actions))
+    ]
+
+
+def test_unknown_actions_fail_the_sync(stub_api: StubSolvimonAPI) -> None:
+    """An action other than `create` or `replace` is refused rather than guessed."""
+    sink = build_sink(stub_api, action_field="action")
+
+    with pytest.raises(ValueError, match="'update'"):
+        send(sink, [{"id": "evt-1", "action": "update"}])
