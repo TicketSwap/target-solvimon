@@ -417,13 +417,36 @@ def test_retries_are_bounded(stub_api: StubSolvimonAPI) -> None:
         sink.process_batch({"records": [sink.build_event({"id": "evt-1"})]})
 
 
-def test_rejected_batches_fail_the_sync(stub_api: StubSolvimonAPI) -> None:
-    """A 4xx is not retried and surfaces the API error body."""
+def test_rejected_events_are_skipped_with_a_warning(
+    stub_api: StubSolvimonAPI,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A refused batch is split until only the refused events are left out."""
     sink = build_sink(stub_api)
-    stub_api.queue_statuses(400)
+    ids = [f"evt-{index}" for index in range(8)]
+    stub_api.reject_events("evt-2", "evt-5")
+
+    with caplog.at_level(logging.WARNING):
+        sink.process_batch({"records": [sink.build_event({"id": id_}) for id_ in ids]})
+
+    assert sorted(event["id"] for event in stub_api.ingested_events) == [
+        id_ for id_ in ids if id_ not in {"evt-2", "evt-5"}
+    ]
+    warnings = [record.message for record in caplog.records if "Skipping event" in record.message]
+    assert len(warnings) == 2
+    assert all("RESOURCES_NOT_FOUND" in message for message in warnings)
+    assert '"id":"evt-2"' in warnings[0]
+    assert '"id":"evt-5"' in warnings[1]
+
+
+@pytest.mark.parametrize("status", [401, 404])
+def test_request_failures_fail_the_sync(stub_api: StubSolvimonAPI, status: int) -> None:
+    """An auth error or a 404 without a missing resource is not split and fails the sync."""
+    sink = build_sink(stub_api)
+    stub_api.queue_statuses(status)
 
     with pytest.raises(FatalAPIError, match="stubbed failure"):
-        sink.process_batch({"records": [sink.build_event({"id": "evt-1"})]})
+        sink.process_batch({"records": [sink.build_event({"id": f"evt-{i}"}) for i in range(4)]})
 
     assert len(stub_api.requests) == 1
 

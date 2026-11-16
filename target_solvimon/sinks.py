@@ -19,6 +19,7 @@ from target_solvimon.client import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
     MAX_EVENTS_PER_REQUEST,
+    RejectedEventsError,
     SolvimonClient,
 )
 
@@ -257,21 +258,46 @@ class SolvimonSink(BatchSink):
         events: list[dict] = context.get("records", [])
 
         for start in range(0, len(events), MAX_EVENTS_PER_REQUEST):
-            chunk = events[start : start + MAX_EVENTS_PER_REQUEST]
-            response = self.client.ingest_events(chunk)
-            acknowledged = response.get(self.client.events_key)
-            if acknowledged is not None and len(acknowledged) != len(chunk):
+            self.ingest(events[start : start + MAX_EVENTS_PER_REQUEST])
+
+    def ingest(self, events: list[dict]) -> None:
+        """Send events, skipping only the ones Solvimon refuses.
+
+        A refused batch is split in half and each half resent, until every refused
+        event is isolated and reported with a warning.
+
+        Args:
+            events: At most :data:`MAX_EVENTS_PER_REQUEST` events.
+        """
+        try:
+            response = self.client.ingest_events(events)
+        except RejectedEventsError as error:
+            if len(events) == 1:
                 self.logger.warning(
-                    "Solvimon acknowledged %d of the %d events sent for stream '%s'",
-                    len(acknowledged),
-                    len(chunk),
+                    "Skipping event of stream '%s' that Solvimon rejected: %s. Event: %s",
                     self.stream_name,
+                    error,
+                    serialize_json(events[0]),
                 )
-            self.logger.debug(
-                "Ingested %d events for stream '%s'",
-                len(chunk),
+                return
+            middle = len(events) // 2
+            self.ingest(events[:middle])
+            self.ingest(events[middle:])
+            return
+
+        acknowledged = response.get(self.client.events_key)
+        if acknowledged is not None and len(acknowledged) != len(events):
+            self.logger.warning(
+                "Solvimon acknowledged %d of the %d events sent for stream '%s'",
+                len(acknowledged),
+                len(events),
                 self.stream_name,
             )
+        self.logger.debug(
+            "Ingested %d events for stream '%s'",
+            len(events),
+            self.stream_name,
+        )
 
     @override
     def clean_up(self) -> None:
