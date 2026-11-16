@@ -55,6 +55,7 @@ uv tool install git+https://github.com/ticketswap/target-solvimon.git@main
 | meter_reference | False | None | Reference of the meter every event belongs to, added to each event. |
 | meter_properties | False | None | Record fields to send as meter properties: a list of field names, or a mapping of property reference to record field. |
 | meter_values | False | None | Meter values to build per record, keyed by value reference. See below. |
+| action_field | False | None | Record field holding `create` or `replace`. A `replace` deletes the live event with the same `reference` before ingesting. Never sent to Solvimon. |
 | extra_fields | False | `passthrough` | What to do with record fields that are not mapped to `id`, `reference` or `timestamp`: `passthrough`, `meter_properties` or `ignore`. |
 
 The SDK also provides `batch_size_rows`, `add_record_metadata`, `validate_records`,
@@ -110,6 +111,22 @@ handled according to `extra_fields`:
 
 `_sdc_*` metadata fields are never sent to the API.
 
+#### Replacing events
+
+Solvimon keeps the first event it gets per `reference` and stores a re-sent one as a
+`DUPLICATE`, which isn't billed. To change an event, set `action_field` to a record field
+holding `create` or `replace`. For each request, the target first calls
+`POST /v1/ingest/meter-data/delete` with the `reference` of every `replace` record, then
+ingests all events of the request. A delete answered with `404 RESOURCE_NOT_FOUND` (no live
+event to replace) counts as done, so a `replace` also works for a reference Solvimon never
+got. Records without the field, or with no value in it, are created; any other value fails
+the sync. The API key then also needs the `METER_DATA.DELETE` permission.
+
+A replacement that Solvimon refuses after its live event was deleted fails the sync instead
+of being skipped, so the reference is never silently left without a live event. A batch that
+repeats a reference alongside a `replace` also fails, since one request can't apply a create
+and a replace of the same reference in order; repeats across batches are applied in order.
+
 ### Batching, retries and failures
 
 Records are buffered per stream and sent in batches of at most 1000 events, the limit
@@ -134,7 +151,7 @@ environment variable is set either in the terminal context or in the `.env` file
 ### Authentication and Authorization
 
 The API key is sent as the `X-API-KEY` header and needs the `METER_DATA.INGEST`
-permission. Deployments that additionally require a bearer token can set `auth_token`,
+permission, plus `METER_DATA.DELETE` when `action_field` is set. Deployments that additionally require a bearer token can set `auth_token`,
 which is sent as `Authorization: Bearer <token>`, and `platform_id`, which is sent as
 `x-platform-id`.
 

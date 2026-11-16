@@ -8,7 +8,7 @@ import sys
 import typing as t
 import uuid
 
-from singer_sdk.exceptions import ConfigValidationError
+from singer_sdk.exceptions import ConfigValidationError, FatalAPIError
 from singer_sdk.singerlib.json import serialize_json
 from singer_sdk.sinks import BatchSink
 
@@ -58,6 +58,11 @@ METER_VALUE_KEYS = frozenset(
         *(f"{kind}_field" for kind in VALUE_KINDS),
     }
 )
+
+ACTION_CREATE = "create"
+ACTION_REPLACE = "replace"
+REPLACE_REFERENCES = "replace_references"
+STAGED_REFERENCES = "staged_references"
 
 EXTRA_FIELDS_PASSTHROUGH = "passthrough"
 EXTRA_FIELDS_METER_PROPERTIES = "meter_properties"
@@ -229,6 +234,7 @@ class SolvimonSink(BatchSink):
         self.static_customer_reference: str | None = self.config.get("customer_reference")
         self.static_reference: str | None = self.config.get("event_reference")
         self.extra_fields: str = self.config.get("extra_fields", DEFAULT_EXTRA_FIELDS)
+        self.action_field: str | None = self.config.get("action_field")
 
         self.meter_reference: str | None = self.config.get("meter_reference")
         self.property_fields: dict[str, str] = self.parse_meter_properties()
@@ -246,21 +252,88 @@ class SolvimonSink(BatchSink):
             record: Individual record in the stream.
             context: Stream partition or context dictionary.
         """
-        context.setdefault("records", []).append(self.build_event(record))
+        event = self.build_event(record)
+        replace = self.is_replace(record)
+        self.stage_reference(event["reference"], replace=replace, context=context)
+        context.setdefault("records", []).append(event)
+        if replace:
+            context.setdefault(REPLACE_REFERENCES, set()).add(event["reference"])
+
+    def stage_reference(self, reference: str, *, replace: bool, context: dict) -> None:
+        """Refuse a reference that a batch holds more than once alongside a replace.
+
+        Deletes run before a whole request is ingested, so a create and a replace of
+        one reference in the same batch can't be applied in order.
+
+        Args:
+            reference: Reference of the event being staged.
+            replace: Whether the event replaces the live one.
+            context: Stream partition or context dictionary.
+
+        Raises:
+            ValueError: If the reference repeats within the batch and one of its
+                events is a replace.
+        """
+        staged: set[str] = context.setdefault(STAGED_REFERENCES, set())
+        if reference in staged and (replace or reference in context.get(REPLACE_REFERENCES, ())):
+            msg = (
+                f"Stream '{self.stream_name}' repeats reference '{reference}' within one "
+                "batch alongside a replace, which can't be applied in order"
+            )
+            raise ValueError(msg)
+        staged.add(reference)
 
     @override
     def process_batch(self, context: dict) -> None:
         """Send the staged events to the Solvimon ingest endpoint.
 
+        Each chunk first deletes the live event of its `replace` records, so their
+        reference is free to be ingested again with the new values.
+
         Args:
             context: Stream partition or context dictionary.
         """
         events: list[dict] = context.get("records", [])
+        replaces: set[str] = context.get(REPLACE_REFERENCES, set())
 
         for start in range(0, len(events), MAX_EVENTS_PER_REQUEST):
-            self.ingest(events[start : start + MAX_EVENTS_PER_REQUEST])
+            chunk = events[start : start + MAX_EVENTS_PER_REQUEST]
+            deleted = set()
+            for reference in (event["reference"] for event in chunk):
+                if reference not in replaces:
+                    continue
+                if self.client.delete_event(reference):
+                    deleted.add(reference)
+                else:
+                    self.logger.debug("No live event '%s' to replace", reference)
+            self.ingest(chunk, deleted)
 
-    def ingest(self, events: list[dict]) -> None:
+    def is_replace(self, record: dict) -> bool:
+        """Return whether a record replaces the event Solvimon holds for its reference.
+
+        Args:
+            record: Individual record in the stream.
+
+        Returns:
+            True for a `replace` action. Records without `action_field`, or without a
+            value in it, are created.
+
+        Raises:
+            ValueError: If the action is neither `create` nor `replace`, rather than
+                guess whether an event should be overwritten.
+        """
+        action = record.get(self.action_field) if self.action_field else None
+        if action in (None, ACTION_CREATE):
+            return False
+        if action == ACTION_REPLACE:
+            return True
+        msg = (
+            f"Record of stream '{self.stream_name}' has {self.action_field}={action!r}; "
+            f"expected '{ACTION_CREATE}' or '{ACTION_REPLACE}'"
+        )
+        raise ValueError(msg)
+
+    def ingest(self, events: list[dict], deleted: set[str] | frozenset[str] = frozenset()) -> None:
         """Send events, skipping only the ones Solvimon refuses.
 
         A refused batch is split in half and each half resent, until every refused
@@ -268,10 +341,23 @@ class SolvimonSink(BatchSink):
 
         Args:
             events: At most :data:`MAX_EVENTS_PER_REQUEST` events.
+            deleted: References whose live event was deleted to replace it.
+
+        Raises:
+            FatalAPIError: If Solvimon refuses a replacement whose live event was
+                already deleted, since skipping it would leave the reference without a
+                live event while the sync moves on.
         """
         try:
             response = self.client.ingest_events(events)
         except RejectedEventsError as error:
+            if len(events) == 1 and events[0]["reference"] in deleted:
+                msg = (
+                    f"Solvimon rejected the replacement of event '{events[0]['reference']}' "
+                    f"after its live event was deleted: {error}. "
+                    f"Event: {serialize_json(events[0])}"
+                )
+                raise FatalAPIError(msg) from error
             if len(events) == 1:
                 self.logger.warning(
                     "Skipping event of stream '%s' that Solvimon rejected: %s. Event: %s",
@@ -281,8 +367,8 @@ class SolvimonSink(BatchSink):
                 )
                 return
             middle = len(events) // 2
-            self.ingest(events[:middle])
-            self.ingest(events[middle:])
+            self.ingest(events[:middle], deleted)
+            self.ingest(events[middle:], deleted)
             return
 
         acknowledged = response.get(self.client.events_key)
@@ -540,6 +626,8 @@ class SolvimonSink(BatchSink):
             self.timestamp_field,
             self.customer_reference_field,
         }
+        if self.action_field:
+            consumed.add(self.action_field)
         consumed.update(self.property_fields.values())
         for spec in self.value_specs.values():
             consumed.update(value for key, value in spec.items() if key.endswith("_field"))

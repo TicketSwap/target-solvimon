@@ -139,6 +139,11 @@ plugins:
       label: Meter Values
       description: Meter values to build per record, keyed by the value reference in Solvimon. Each entry takes exactly one of `amount_field` (with `currency_field` or `currency`), `number`, `number_field`, `count` or `count_field`.
 
+    - name: action_field
+      kind: string
+      label: Action Field
+      description: Record field holding `create` or `replace`. A `replace` first deletes the live event with the same `reference`, then ingests it. The field is never sent to Solvimon. Leave unset to create every event.
+
     - name: extra_fields
       kind: options
       label: Extra Fields Handling
