@@ -228,6 +228,15 @@ class TargetSolvimon(Target):
             "or `count_field`. Values whose record field is empty are left out.",
         ),
         th.Property(
+            "action_field",
+            th.StringType(nullable=True),
+            title="Action Field",
+            description="Record field saying what to do with the event: `create` "
+            "ingests it, `replace` first deletes the live event with the same "
+            "`reference` (a reference without one is fine), then ingests it. The "
+            "field is never sent to Solvimon. Leave unset to create every event.",
+        ),
+        th.Property(
             "extra_fields",
             th.StringType(nullable=False),
             default=DEFAULT_EXTRA_FIELDS,
