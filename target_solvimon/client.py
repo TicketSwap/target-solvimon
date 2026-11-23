@@ -1,6 +1,6 @@
 """HTTP client for the Solvimon event ingest API.
 
-Docs: https://docs.solvimon.com/api-docs/event-api/post-v-2-events-ingest-batch
+Docs: https://docs.solvimon.com/api-docs/event-api/ingest/post-ingest-meter-datas
 """
 
 from __future__ import annotations
@@ -21,22 +21,12 @@ if t.TYPE_CHECKING:
 # Default to the TEST environment: a half-configured pipeline should never write
 # billable events to production.
 DEFAULT_API_URL = "https://test.api.solvimon.com"
-# The v2 endpoint the API docs describe answers 404 on both the test and the live
-# host, so default to the v1 batch endpoint that is actually served. Both take the
-# same events, under a different key.
-API_VERSIONS = ("v1", "v2")
-DEFAULT_API_VERSION = "v1"
-INGEST_BATCH_PATHS = {
-    "v1": "/v1/events/ingest-batch",
-    "v2": "/v2/events/ingest-batch",
-}
-INGEST_BATCH_KEYS = {"v1": "meter_datas", "v2": "events"}
-COST_PREDICTION_PATH = "/v1/ingest/meter-datas"
+INGEST_PATH = "/v1/ingest/meter-datas"
+EVENTS_KEY = "meter_datas"
 EVENT_PATH = "/v1/ingest/meter-data"
 # Soft-deletes the event with a reference, so the reference can be ingested again.
 DELETE_EVENT_PATH = "/v1/ingest/meter-data/delete"
 
-# Hard limit enforced by the high-throughput ingest service.
 MAX_EVENTS_PER_REQUEST = 1000
 
 DEFAULT_TIMEOUT = 60
@@ -69,7 +59,6 @@ class SolvimonClient:
         logger: logging.Logger,
         api_key: str,
         api_url: str = DEFAULT_API_URL,
-        api_version: str = DEFAULT_API_VERSION,
         auth_token: str | None = None,
         platform_id: str | None = None,
         timeout: int = DEFAULT_TIMEOUT,
@@ -83,23 +72,17 @@ class SolvimonClient:
             logger: Logger to report retries and API failures on.
             api_key: Value of the ``X-API-KEY`` header.
             api_url: Base URL of the Solvimon API (test or live environment).
-            api_version: Version of the batch ingest endpoint to call.
             auth_token: Optional bearer token for the ``Authorization`` header.
             platform_id: Optional value of the ``x-platform-id`` header.
             timeout: Per-request timeout in seconds.
             max_retries: Attempts to retry a request that failed transiently.
             backoff_factor: Exponential backoff factor between retries, in seconds.
-            cost_prediction: Ingest through the endpoint that returns the predicted
-                cost of every event, instead of the batch endpoint of `api_version`.
+            cost_prediction: Ask Solvimon to return the predicted cost of every
+                ingested event.
         """
         self.logger = logger
         self.api_url = api_url.rstrip("/")
-        self.api_version = api_version
-        self.ingest_path = (
-            COST_PREDICTION_PATH if cost_prediction else INGEST_BATCH_PATHS[api_version]
-        )
         self.ingest_params = {"cost_prediction": "true"} if cost_prediction else {}
-        self.events_key = INGEST_BATCH_KEYS["v1" if cost_prediction else api_version]
         self.timeout = timeout
 
         headers = {
@@ -129,15 +112,6 @@ class SolvimonClient:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
 
-    @property
-    def ingest_batch_url(self) -> str:
-        """URL of the batch ingest endpoint.
-
-        Returns:
-            The fully qualified endpoint URL.
-        """
-        return f"{self.api_url}{self.ingest_path}"
-
     def ingest_events(self, events: list[dict]) -> dict:
         """Send one batch of events to the ingest endpoint.
 
@@ -160,9 +134,9 @@ class SolvimonClient:
             )
             raise ValueError(msg)
 
-        body = serialize_json({self.events_key: events}).encode()
+        body = serialize_json({EVENTS_KEY: events}).encode()
         response = self.session.post(
-            self.ingest_batch_url,
+            f"{self.api_url}{INGEST_PATH}",
             params=self.ingest_params,
             data=body,
             timeout=self.timeout,

@@ -6,9 +6,7 @@ from singer_sdk import typing as th
 from singer_sdk.target_base import Target
 
 from target_solvimon.client import (
-    API_VERSIONS,
     DEFAULT_API_URL,
-    DEFAULT_API_VERSION,
     DEFAULT_BACKOFF_FACTOR,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
@@ -51,17 +49,6 @@ class TargetSolvimon(Target):
             title="API URL",
             description="Base URL of the Solvimon API. Defaults to the test "
             "environment; use `https://api.solvimon.com` to write billable events.",
-        ),
-        th.Property(
-            "api_version",
-            th.StringType(nullable=False),
-            default=DEFAULT_API_VERSION,
-            allowed_values=list(API_VERSIONS),
-            title="Ingest API Version",
-            description="Version of the batch ingest endpoint to call: `v1` posts "
-            "`meter_datas` to `/v1/events/ingest-batch`, `v2` posts `events` to "
-            "`/v2/events/ingest-batch`. The v2 endpoint is documented but currently "
-            "answers 404 on both the test and the live host.",
         ),
         th.Property(
             "auth_token",
@@ -257,11 +244,11 @@ class TargetSolvimon(Target):
             title="Cost Prediction Path",
             description="Folder to write Solvimon's cost prediction of every ingested "
             "event to, e.g. `s3://bucket/solvimon/cost_prediction` (S3 needs the `s3` "
-            "extra). Setting it ingests through `/v1/ingest/meter-datas?cost_prediction=true` "
-            "instead of the batch endpoint of `api_version`, and writes each accepted request "
-            "as one gzipped JSON lines file under `predictions/`, stamped with `_sdc_batched_at`. "
-            "Events whose prediction is `PENDING` are listed under `pending/<stream>/` and "
-            "looked up again at the end of every run, which needs `METER_DATA.VIEW`.",
+            "extra). Setting it asks Solvimon for the predicted cost on ingest "
+            "(`cost_prediction=true`) and writes each accepted request as one gzipped JSON "
+            "lines file under `predictions/`, stamped with `_sdc_batched_at`. Events whose "
+            "prediction is `PENDING` are listed under `pending/<stream>/` and looked up "
+            "again at the end of every run, which needs `METER_DATA.VIEW`.",
         ),
     ).to_dict()
 

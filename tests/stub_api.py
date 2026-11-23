@@ -17,12 +17,11 @@ if sys.version_info >= (3, 12):
 else:
     from typing_extensions import override
 
-INGEST_PATH = "/v1/events/ingest-batch"
-INGEST_PATH_V2 = "/v2/events/ingest-batch"
-PREDICTION_PATH = "/v1/ingest/meter-datas?cost_prediction=true"
+INGEST_PATH = "/v1/ingest/meter-datas"
+PREDICTION_PATH = f"{INGEST_PATH}?cost_prediction=true"
 EVENT_PATH = "/v1/ingest/meter-data/"
 DELETE_PATH = "/v1/ingest/meter-data/delete"
-EVENTS_KEYS = ("meter_datas", "events")
+EVENTS_KEY = "meter_datas"
 
 ERROR_BODY = {
     "type": "INVALID_REQUEST",
@@ -39,18 +38,6 @@ MISSING_CUSTOMER_BODY = {
     "code": "NOT_FOUND",
     "message": "The requested CUSTOMER could not be found",
 }
-
-
-def events_key(body: dict) -> str:
-    """Return the key a request body carries its events under.
-
-    Args:
-        body: The decoded request body.
-
-    Returns:
-        The wrapper key used by the API version the target called.
-    """
-    return next((key for key in EVENTS_KEYS if key in body), EVENTS_KEYS[0])
 
 
 class StubRequest(t.NamedTuple):
@@ -104,7 +91,7 @@ class StubSolvimonAPI:
             event
             for request in self.requests
             if request.path != DELETE_PATH
-            for event in request.body[events_key(request.body)]
+            for event in request.body[EVENTS_KEY]
         ]
 
     @property
@@ -118,7 +105,7 @@ class StubSolvimonAPI:
             event
             for request in self.requests
             if request.path != DELETE_PATH and request.status < 400
-            for event in request.body[events_key(request.body)]
+            for event in request.body[EVENTS_KEY]
         ]
 
     def reset(self) -> None:
@@ -206,7 +193,7 @@ class StubSolvimonAPI:
             if path == DELETE_PATH:
                 status = self._statuses.pop(0) if self._statuses else 200
                 return status, ERROR_BODY if status >= 400 else {}
-            events = body.get(events_key(body), [])
+            events = body.get(EVENTS_KEY, [])
             if any(event.get("id") in self._rejected_ids for event in events):
                 return 404, MISSING_CUSTOMER_BODY
             return (self._statuses.pop(0) if self._statuses else 200), ERROR_BODY
@@ -241,18 +228,14 @@ class StubSolvimonAPI:
                     payload = json.dumps(error_body).encode()
                 elif self.path == PREDICTION_PATH:
                     with stub._lock:
-                        acknowledged = [stub._meter_data(event) for event in body["meter_datas"]]
+                        acknowledged = [stub._meter_data(event) for event in body[EVENTS_KEY]]
                         stub._stored.update({event["id"]: event for event in acknowledged})
-                    payload = json.dumps({"meter_datas": acknowledged}).encode()
+                    payload = json.dumps({EVENTS_KEY: acknowledged}).encode()
                 else:
-                    key = events_key(body)
-                    payload = json.dumps(
-                        {
-                            key: [
-                                {"reference": event.get("reference")} for event in body.get(key, [])
-                            ]
-                        }
-                    ).encode()
+                    acknowledged = [
+                        {"reference": event.get("reference")} for event in body[EVENTS_KEY]
+                    ]
+                    payload = json.dumps({EVENTS_KEY: acknowledged}).encode()
 
                 self._respond(status, payload)
 

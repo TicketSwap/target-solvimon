@@ -18,10 +18,10 @@ from singer_sdk.sinks import BatchSink
 
 from target_solvimon.client import (
     DEFAULT_API_URL,
-    DEFAULT_API_VERSION,
     DEFAULT_BACKOFF_FACTOR,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
+    EVENTS_KEY,
     MAX_EVENTS_PER_REQUEST,
     RejectedEventsError,
     SolvimonClient,
@@ -252,7 +252,6 @@ class SolvimonSink(BatchSink):
             logger=self.logger,
             api_key=self.config["api_key"],
             api_url=self.config.get("api_url", DEFAULT_API_URL),
-            api_version=self.config.get("api_version", DEFAULT_API_VERSION),
             auth_token=self.config.get("auth_token"),
             platform_id=self.config.get("platform_id"),
             timeout=self.config.get("timeout", DEFAULT_TIMEOUT),
@@ -417,7 +416,7 @@ class SolvimonSink(BatchSink):
             self.ingest(events[middle:], deleted)
             return
 
-        acknowledged = response.get(self.client.events_key)
+        acknowledged = response.get(EVENTS_KEY)
         if acknowledged is not None and len(acknowledged) != len(events):
             self.logger.warning(
                 "Solvimon acknowledged %d of the %d events sent for stream '%s'",
@@ -513,7 +512,7 @@ class SolvimonSink(BatchSink):
             record: Individual record in the stream.
 
         Returns:
-            An event object accepted by ``POST /v2/events/ingest-batch``.
+            An event object accepted by ``POST /v1/ingest/meter-datas``.
         """
         event: dict[str, t.Any] = {}
         event_id = self.event_id(record)

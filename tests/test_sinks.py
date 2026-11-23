@@ -18,7 +18,6 @@ from target_solvimon.target import TargetSolvimon
 from tests.stub_api import (
     DELETE_PATH,
     INGEST_PATH,
-    INGEST_PATH_V2,
     PREDICTION_PATH,
     StubSolvimonAPI,
 )
@@ -139,17 +138,6 @@ def test_record_maps_onto_the_event_shape(stub_api: StubSolvimonAPI) -> None:
             "quantity": 2,
         }
     ]
-
-
-def test_v2_posts_events_to_the_v2_endpoint(stub_api: StubSolvimonAPI) -> None:
-    """`api_version: v2` switches both the path and the wrapper key."""
-    sink = build_sink(stub_api, api_version="v2")
-
-    sink.process_batch({"records": [sink.build_event({"id": "evt-1"})]})
-
-    request = stub_api.requests[0]
-    assert request.path == INGEST_PATH_V2
-    assert list(request.body) == ["events"]
 
 
 def test_credentials_are_sent_as_headers(stub_api: StubSolvimonAPI) -> None:
@@ -769,7 +757,7 @@ def test_stream_names_stay_inside_the_pending_folder(
 def test_without_a_cost_prediction_path_nothing_is_looked_up(
     stub_api: StubSolvimonAPI,
 ) -> None:
-    """The batch endpoint stays in use and the run ends without lookups."""
+    """Requests ask for no predictions and the run ends without lookups."""
     sink = build_sink(stub_api)
 
     send(sink, [{"id": "evt-1"}])
