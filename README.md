@@ -57,6 +57,7 @@ uv tool install git+https://github.com/ticketswap/target-solvimon.git@main
 | meter_values | False | None | Meter values to build per record, keyed by value reference. See below. |
 | action_field | False | None | Record field holding `create` or `replace`. A `replace` deletes the live event with the same `reference` before ingesting. Never sent to Solvimon. |
 | extra_fields | False | `passthrough` | What to do with record fields that are not mapped to `id`, `reference` or `timestamp`: `passthrough`, `meter_properties` or `ignore`. |
+| cost_prediction_path | False | None | Folder to write the cost prediction of every ingested event to, e.g. `s3://bucket/solvimon/cost_prediction`. See below. |
 
 The SDK also provides `batch_size_rows`, `add_record_metadata`, `validate_records`,
 `stream_maps` and schema flattening. A full list of supported settings and
@@ -140,6 +141,24 @@ the refused events are isolated: each is skipped with a warning carrying the API
 the event, and the rest is ingested. Anything else — auth errors, an unknown endpoint, and
 anything still failing once the retries are used up — fails the sync with the status code
 and the API error body.
+
+### Cost predictions
+
+With `cost_prediction_path` set, events go to `POST /v1/ingest/meter-datas?cost_prediction=true`
+instead of the batch endpoint of `api_version`, and Solvimon answers with the predicted cost of
+each event. The events of every request Solvimon accepts are written, as Solvimon returned
+them plus `_sdc_batched_at`, to one gzipped JSON lines file before the next request is sent:
+
+```
+<cost_prediction_path>/predictions/<UTC write time>-<random id>.jsonl.gz
+```
+
+When loading, drop rows whose `cost_prediction.status` is `DUPLICATE`, then keep the newest
+row per `reference` by `_sdc_batched_at`. A replayed event comes back as a duplicate, and would
+otherwise replace its original prediction.
+
+Install the `s3` extra to write to S3; any other
+[fsspec](https://filesystem-spec.readthedocs.io/) URL, such as a local folder, works too.
 
 ### Configure using environment variables
 

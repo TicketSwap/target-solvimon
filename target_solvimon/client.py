@@ -30,6 +30,7 @@ INGEST_BATCH_PATHS = {
     "v2": "/v2/events/ingest-batch",
 }
 INGEST_BATCH_KEYS = {"v1": "meter_datas", "v2": "events"}
+COST_PREDICTION_PATH = "/v1/ingest/meter-datas"
 # Soft-deletes the event with a reference, so the reference can be ingested again.
 DELETE_EVENT_PATH = "/v1/ingest/meter-data/delete"
 
@@ -72,6 +73,7 @@ class SolvimonClient:
         timeout: int = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         backoff_factor: int = DEFAULT_BACKOFF_FACTOR,
+        cost_prediction: bool = False,
     ) -> None:
         """Initialize the client.
 
@@ -85,11 +87,17 @@ class SolvimonClient:
             timeout: Per-request timeout in seconds.
             max_retries: Attempts to retry a request that failed transiently.
             backoff_factor: Exponential backoff factor between retries, in seconds.
+            cost_prediction: Ingest through the endpoint that returns the predicted
+                cost of every event, instead of the batch endpoint of `api_version`.
         """
         self.logger = logger
         self.api_url = api_url.rstrip("/")
         self.api_version = api_version
-        self.events_key = INGEST_BATCH_KEYS[api_version]
+        self.ingest_path = (
+            COST_PREDICTION_PATH if cost_prediction else INGEST_BATCH_PATHS[api_version]
+        )
+        self.ingest_params = {"cost_prediction": "true"} if cost_prediction else {}
+        self.events_key = INGEST_BATCH_KEYS["v1" if cost_prediction else api_version]
         self.timeout = timeout
 
         headers = {
@@ -126,7 +134,7 @@ class SolvimonClient:
         Returns:
             The fully qualified endpoint URL.
         """
-        return f"{self.api_url}{INGEST_BATCH_PATHS[self.api_version]}"
+        return f"{self.api_url}{self.ingest_path}"
 
     def ingest_events(self, events: list[dict]) -> dict:
         """Send one batch of events to the ingest endpoint.
@@ -153,6 +161,7 @@ class SolvimonClient:
         body = serialize_json({self.events_key: events}).encode()
         response = self.session.post(
             self.ingest_batch_url,
+            params=self.ingest_params,
             data=body,
             timeout=self.timeout,
         )

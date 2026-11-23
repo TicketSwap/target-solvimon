@@ -251,6 +251,16 @@ class TargetSolvimon(Target):
             "already shaped like Solvimon events), turn them into `meter_properties` "
             "entries, or drop them.",
         ),
+        th.Property(
+            "cost_prediction_path",
+            th.StringType(nullable=True),
+            title="Cost Prediction Path",
+            description="Folder to write Solvimon's cost prediction of every ingested "
+            "event to, e.g. `s3://bucket/solvimon/cost_prediction` (S3 needs the `s3` "
+            "extra). Setting it ingests through `/v1/ingest/meter-datas?cost_prediction=true` "
+            "instead of the batch endpoint of `api_version`, and writes each accepted request "
+            "as one gzipped JSON lines file under `predictions/`, stamped with `_sdc_batched_at`.",
+        ),
     ).to_dict()
 
     default_sink_class = SolvimonSink

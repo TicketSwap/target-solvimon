@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import datetime as dt
 import decimal
+import gzip
 import sys
 import typing as t
 import uuid
 
+from fsspec.core import url_to_fs
+from fsspec.utils import get_protocol
 from singer_sdk.exceptions import ConfigValidationError, FatalAPIError
 from singer_sdk.singerlib.json import serialize_json
 from singer_sdk.sinks import BatchSink
@@ -29,10 +32,14 @@ else:
     from typing_extensions import override
 
 if t.TYPE_CHECKING:
+    from fsspec import AbstractFileSystem
     from singer_sdk.target_base import Target
 
 SDC_PREFIX = "_sdc_"
 EXTRACTED_AT_FIELD = "_sdc_extracted_at"
+BATCHED_AT_FIELD = "_sdc_batched_at"
+
+PREDICTIONS_FOLDER = "predictions"
 
 # Fixed namespace for derived event ids: replaying a sync then produces the same ids,
 # so Solvimon deduplicates instead of double-billing.
@@ -149,6 +156,18 @@ def build_meter_value(reference: str, spec: dict, record: dict) -> dict | None:
     return None  # pragma: no cover - the spec is validated on startup
 
 
+def file_name(suffix: str) -> str:
+    """Return a unique file name that sorts in the order files are written.
+
+    Args:
+        suffix: Extension of the file.
+
+    Returns:
+        The UTC write time followed by a random id.
+    """
+    return f"{dt.datetime.now(tz=dt.UTC):%Y%m%dT%H%M%S%fZ}-{uuid.uuid4().hex}{suffix}"
+
+
 def meter_value_spec_problems(spec: t.Any) -> list[str]:  # noqa: ANN401
     """Describe what is wrong with one `meter_values` entry.
 
@@ -205,6 +224,13 @@ class SolvimonSink(BatchSink):
         """
         super().__init__(target, stream_name, schema, key_properties)
 
+        prediction_path: str | None = self.config.get("cost_prediction_path")
+        self.prediction_fs: AbstractFileSystem | None = None
+        if prediction_path:
+            options = {"auto_mkdir": True} if get_protocol(prediction_path) == "file" else {}
+            self.prediction_fs, root = url_to_fs(prediction_path, **options)
+            self.predictions_dir = f"{root}/{PREDICTIONS_FOLDER}"
+
         self.client = SolvimonClient(
             logger=self.logger,
             api_key=self.config["api_key"],
@@ -215,6 +241,7 @@ class SolvimonSink(BatchSink):
             timeout=self.config.get("timeout", DEFAULT_TIMEOUT),
             max_retries=self.config.get("max_retries", DEFAULT_MAX_RETRIES),
             backoff_factor=self.config.get("backoff_factor", DEFAULT_BACKOFF_FACTOR),
+            cost_prediction=self.prediction_fs is not None,
         )
 
         self.id_field: str = self.config.get("event_id_field", DEFAULT_ID_FIELD)
@@ -337,7 +364,9 @@ class SolvimonSink(BatchSink):
         """Send events, skipping only the ones Solvimon refuses.
 
         A refused batch is split in half and each half resent, until every refused
-        event is isolated and reported with a warning.
+        event is isolated and reported with a warning. The cost predictions of every
+        accepted request are stored before the next request is sent, so a later
+        failure can't lose them.
 
         Args:
             events: At most :data:`MAX_EVENTS_PER_REQUEST` events.
@@ -383,6 +412,27 @@ class SolvimonSink(BatchSink):
             "Ingested %d events for stream '%s'",
             len(events),
             self.stream_name,
+        )
+        self.store_predictions(acknowledged or [])
+
+    def store_predictions(self, events: list[dict]) -> None:
+        """Write the events of one accepted request with their cost prediction, in one file.
+
+        Every event is stamped with `_sdc_batched_at`, so the newest row per event
+        wins however the files are loaded.
+
+        Args:
+            events: Events as Solvimon returned them.
+        """
+        if self.prediction_fs is None or not events:
+            return
+        batched_at = dt.datetime.now(tz=dt.UTC).isoformat()
+        lines = "".join(
+            serialize_json({**event, BATCHED_AT_FIELD: batched_at}) + "\n" for event in events
+        )
+        self.prediction_fs.pipe_file(
+            f"{self.predictions_dir}/{file_name('.jsonl.gz')}",
+            gzip.compress(lines.encode()),
         )
 
     @override

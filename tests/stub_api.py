@@ -19,6 +19,7 @@ else:
 
 INGEST_PATH = "/v1/events/ingest-batch"
 INGEST_PATH_V2 = "/v2/events/ingest-batch"
+PREDICTION_PATH = "/v1/ingest/meter-datas?cost_prediction=true"
 DELETE_PATH = "/v1/ingest/meter-data/delete"
 EVENTS_KEYS = ("meter_datas", "events")
 
@@ -69,6 +70,7 @@ class StubSolvimonAPI:
         self._statuses: list[int] = []
         self._rejected_ids: set[str] = set()
         self._missing_references: set[str] = set()
+        self._pending_ids: set[str] = set()
         self._lock = threading.Lock()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._build_handler())
         self._thread = threading.Thread(
@@ -123,6 +125,21 @@ class StubSolvimonAPI:
             self._statuses.clear()
             self._rejected_ids.clear()
             self._missing_references.clear()
+            self._pending_ids.clear()
+
+    def pend_predictions(self, *event_ids: str) -> None:
+        """Answer the cost prediction of these events as `PENDING`.
+
+        Args:
+            event_ids: Ids of the events whose prediction is not final.
+        """
+        with self._lock:
+            self._pending_ids.update(event_ids)
+
+    def _meter_data(self, event: dict) -> dict:
+        event_id = event.get("id") or f"mdat-{event['reference']}"
+        status = "PENDING" if event_id in self._pending_ids else "READY"
+        return {**event, "id": event_id, "cost_prediction": {"response": "OK", "status": status}}
 
     @property
     def deleted_references(self) -> list[str]:
@@ -208,6 +225,10 @@ class StubSolvimonAPI:
 
                 if status >= 400 or self.path == DELETE_PATH:
                     payload = json.dumps(error_body).encode()
+                elif self.path == PREDICTION_PATH:
+                    with stub._lock:
+                        acknowledged = [stub._meter_data(event) for event in body["meter_datas"]]
+                    payload = json.dumps({"meter_datas": acknowledged}).encode()
                 else:
                     key = events_key(body)
                     payload = json.dumps(

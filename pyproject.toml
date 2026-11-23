@@ -49,6 +49,7 @@ dev = [
 test = [
     "pytest>=9.1.1",
     "pytest-github-actions-annotate-failures>=0.4.2",
+    "s3fs>=2026.9.0",
     "singer-sdk[testing]",
 ]
 typing = [
@@ -70,6 +71,10 @@ warn_redundant_casts = true
 warn_unreachable = true
 warn_unused_configs = true
 warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["fsspec", "fsspec.*", "s3fs"]
+ignore_missing_imports = true
 
 [tool.ty.rules]
 missing-override-decorator = "error"

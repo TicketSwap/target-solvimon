@@ -3,19 +3,29 @@
 from __future__ import annotations
 
 import datetime as dt
+import gzip
+import json
 import logging
 import typing as t
 
 import pytest
+from s3fs import S3FileSystem
 from singer_sdk.exceptions import ConfigValidationError, FatalAPIError
 
 from target_solvimon.client import MAX_EVENTS_PER_REQUEST
 from target_solvimon.sinks import SolvimonSink
 from target_solvimon.target import TargetSolvimon
-from tests.stub_api import DELETE_PATH, INGEST_PATH, INGEST_PATH_V2, StubSolvimonAPI
+from tests.stub_api import (
+    DELETE_PATH,
+    INGEST_PATH,
+    INGEST_PATH_V2,
+    PREDICTION_PATH,
+    StubSolvimonAPI,
+)
 
 if t.TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 SCHEMA: dict[str, t.Any] = {
     "type": "object",
@@ -639,3 +649,68 @@ def test_replaces_across_batches_apply_in_order(stub_api: StubSolvimonAPI) -> No
         DELETE_PATH,
         INGEST_PATH,
     ]
+
+
+def read_predictions(folder: Path) -> list[list[dict]]:
+    """Read the cost prediction files under a `cost_prediction_path`, oldest first.
+
+    Args:
+        folder: The configured `cost_prediction_path`.
+
+    Returns:
+        The events of each file.
+    """
+    return [
+        [json.loads(line) for line in gzip.decompress(path.read_bytes()).decode().splitlines()]
+        for path in sorted((folder / "predictions").glob("*.jsonl.gz"))
+    ]
+
+
+def test_cost_predictions_are_written_per_request(
+    stub_api: StubSolvimonAPI,
+    tmp_path: Path,
+) -> None:
+    """Events are ingested with predictions on, and each request is written as one file."""
+    sink = build_sink(stub_api, cost_prediction_path=str(tmp_path), derive_event_id=False)
+    stub_api.pend_predictions("mdat-ticket-0002")
+
+    send(sink, [{"reference": "ticket-0001"}, {"reference": "ticket-0002"}])
+
+    assert [request.path for request in stub_api.requests] == [PREDICTION_PATH]
+    assert all("id" not in event for event in stub_api.events)
+    [written] = read_predictions(tmp_path)
+    assert [(event["id"], event["cost_prediction"]["status"]) for event in written] == [
+        ("mdat-ticket-0001", "READY"),
+        ("mdat-ticket-0002", "PENDING"),
+    ]
+    assert all("_sdc_batched_at" in event for event in written)
+
+
+def test_predictions_are_written_before_a_later_request_fails(
+    stub_api: StubSolvimonAPI,
+    tmp_path: Path,
+) -> None:
+    """A refused replacement can't lose the predictions of a request accepted before it."""
+    sink = build_sink(stub_api, cost_prediction_path=str(tmp_path), action_field="action")
+    stub_api.reject_events("evt-2")
+
+    with pytest.raises(FatalAPIError, match="replacement of event 'ticket_2'"):
+        send(
+            sink,
+            [
+                {"id": "evt-1", "reference": "ticket_1", "action": "create"},
+                {"id": "evt-2", "reference": "ticket_2", "action": "replace"},
+            ],
+        )
+
+    assert [[event["id"] for event in written] for written in read_predictions(tmp_path)] == [
+        ["evt-1"]
+    ]
+
+
+def test_s3_paths_get_a_working_s3_session(stub_api: StubSolvimonAPI) -> None:
+    """Options meant for local folders never reach the AWS session of an S3 path."""
+    sink = build_sink(stub_api, cost_prediction_path="s3://bucket/solvimon/cost_prediction")
+
+    assert isinstance(sink.prediction_fs, S3FileSystem)
+    sink.prediction_fs.connect()
