@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import decimal
 import gzip
+import re
 import sys
 import typing as t
 import uuid
@@ -40,6 +41,8 @@ EXTRACTED_AT_FIELD = "_sdc_extracted_at"
 BATCHED_AT_FIELD = "_sdc_batched_at"
 
 PREDICTIONS_FOLDER = "predictions"
+PENDING_FOLDER = "pending"
+PENDING_STATUS = "PENDING"
 
 # Fixed namespace for derived event ids: replaying a sync then produces the same ids,
 # so Solvimon deduplicates instead of double-billing.
@@ -156,6 +159,18 @@ def build_meter_value(reference: str, spec: dict, record: dict) -> dict | None:
     return None  # pragma: no cover - the spec is validated on startup
 
 
+def is_pending(event: dict) -> bool:
+    """Return whether Solvimon has not finished the cost prediction of an event.
+
+    Args:
+        event: An event as Solvimon returns it.
+
+    Returns:
+        True when the prediction status is `PENDING`.
+    """
+    return (event.get("cost_prediction") or {}).get("status") == PENDING_STATUS
+
+
 def file_name(suffix: str) -> str:
     """Return a unique file name that sorts in the order files are written.
 
@@ -230,6 +245,8 @@ class SolvimonSink(BatchSink):
             options = {"auto_mkdir": True} if get_protocol(prediction_path) == "file" else {}
             self.prediction_fs, root = url_to_fs(prediction_path, **options)
             self.predictions_dir = f"{root}/{PREDICTIONS_FOLDER}"
+            folder = re.sub(r"[^\w-]", "_", stream_name)
+            self.pending_dir = f"{root}/{PENDING_FOLDER}/{folder}"
 
         self.client = SolvimonClient(
             logger=self.logger,
@@ -418,8 +435,9 @@ class SolvimonSink(BatchSink):
     def store_predictions(self, events: list[dict]) -> None:
         """Write the events of one accepted request with their cost prediction, in one file.
 
-        Every event is stamped with `_sdc_batched_at`, so the newest row per event
-        wins however the files are loaded.
+        Pending ones are also listed, to be looked up again at the end of the run. Every
+        event is stamped with `_sdc_batched_at`, so the newest row per event wins however
+        the files are loaded.
 
         Args:
             events: Events as Solvimon returned them.
@@ -434,11 +452,58 @@ class SolvimonSink(BatchSink):
             f"{self.predictions_dir}/{file_name('.jsonl.gz')}",
             gzip.compress(lines.encode()),
         )
+        self.list_pending([event for event in events if is_pending(event)])
+
+    def list_pending(self, events: list[dict]) -> None:
+        """List events to look up again at the end of the run.
+
+        Args:
+            events: Events as Solvimon returned them.
+        """
+        if self.prediction_fs is None or not events:
+            return
+        self.prediction_fs.pipe_file(
+            f"{self.pending_dir}/{file_name('.txt')}",
+            "\n".join(event.get("id") or event["reference"] for event in events).encode(),
+        )
+
+    def recheck_pending_predictions(self) -> None:
+        """Look up the events whose cost prediction was pending, and store the result.
+
+        Only events with a final prediction are stored. Events still pending, or whose
+        prediction Solvimon hasn't stored yet, are listed again for the next run. Events
+        Solvimon no longer has, or has deleted since, are dropped.
+        """
+        if self.prediction_fs is None:
+            return
+        listed = self.prediction_fs.glob(f"{self.pending_dir}/*")
+        if not listed:
+            return
+        event_ids = sorted(
+            {line for path in listed for line in self.prediction_fs.cat_file(path).decode().split()}
+        )
+        found = (self.client.get_event(event_id) for event_id in event_ids)
+        settled: list[dict] = []
+        waiting: list[dict] = []
+        for event in found:
+            if event and not event.get("deleted"):
+                waiting_for_it = not event.get("cost_prediction") or is_pending(event)
+                (waiting if waiting_for_it else settled).append(event)
+        self.store_predictions(settled)
+        self.list_pending(waiting)
+        self.prediction_fs.rm(listed)
+        self.logger.info(
+            "Looked up %d pending cost predictions of stream '%s': %d still pending",
+            len(event_ids),
+            self.stream_name,
+            len(waiting),
+        )
 
     @override
     def clean_up(self) -> None:
-        """Close the HTTP session once the stream is fully drained."""
+        """Look up pending cost predictions, then close the HTTP session."""
         super().clean_up()
+        self.recheck_pending_predictions()
         self.client.close()
 
     def build_event(self, record: dict) -> dict:

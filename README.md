@@ -151,13 +151,22 @@ them plus `_sdc_batched_at`, to one gzipped JSON lines file before the next requ
 
 ```
 <cost_prediction_path>/predictions/<UTC write time>-<random id>.jsonl.gz
+<cost_prediction_path>/pending/<stream>/<UTC write time>-<random id>.txt
 ```
+
+A prediction Solvimon hasn't finished has `cost_prediction.status: PENDING`. Those event ids
+are listed under `pending/<stream>/`, and at the end of every run the target looks each one up
+with `GET /v1/ingest/meter-data/{id}`. Events with a final prediction are written as a new
+`predictions/` file. Events still pending, or whose prediction Solvimon hasn't stored yet, are
+listed again. Events Solvimon no longer has, or has deleted since, are dropped. A stream's
+pending events are only looked up in runs that include that stream, and its folder name keeps
+only letters, digits, `_` and `-`.
 
 When loading, drop rows whose `cost_prediction.status` is `DUPLICATE`, then keep the newest
 row per `reference` by `_sdc_batched_at`. A replayed event comes back as a duplicate, and would
 otherwise replace its original prediction.
 
-Install the `s3` extra to write to S3; any other
+The API key also needs `METER_DATA.VIEW`. Install the `s3` extra to write to S3; any other
 [fsspec](https://filesystem-spec.readthedocs.io/) URL, such as a local folder, works too.
 
 ### Configure using environment variables

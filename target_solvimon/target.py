@@ -259,7 +259,9 @@ class TargetSolvimon(Target):
             "event to, e.g. `s3://bucket/solvimon/cost_prediction` (S3 needs the `s3` "
             "extra). Setting it ingests through `/v1/ingest/meter-datas?cost_prediction=true` "
             "instead of the batch endpoint of `api_version`, and writes each accepted request "
-            "as one gzipped JSON lines file under `predictions/`, stamped with `_sdc_batched_at`.",
+            "as one gzipped JSON lines file under `predictions/`, stamped with `_sdc_batched_at`. "
+            "Events whose prediction is `PENDING` are listed under `pending/<stream>/` and "
+            "looked up again at the end of every run, which needs `METER_DATA.VIEW`.",
         ),
     ).to_dict()
 

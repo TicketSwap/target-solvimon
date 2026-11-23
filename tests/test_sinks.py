@@ -71,6 +71,7 @@ def build_sink(
     stub_api: StubSolvimonAPI,
     *,
     key_properties: list[str] | None = None,
+    stream_name: str = "tickets_sold",
     **config: t.Any,
 ) -> SolvimonSink:
     """Build a sink wired to the stub API.
@@ -78,10 +79,11 @@ def build_sink(
     Args:
         stub_api: The stub to send events to.
         key_properties: Key properties of the test stream.
+        stream_name: Name of the test stream.
         config: Extra target configuration.
 
     Returns:
-        A sink for the `tickets_sold` stream.
+        A sink for the test stream.
     """
     target = TargetSolvimon(
         config={
@@ -95,7 +97,7 @@ def build_sink(
     )
     return SolvimonSink(
         target,
-        stream_name="tickets_sold",
+        stream_name=stream_name,
         schema=SCHEMA,
         key_properties=key_properties or ["id"],
     )
@@ -666,6 +668,22 @@ def read_predictions(folder: Path) -> list[list[dict]]:
     ]
 
 
+def pending_ids(folder: Path) -> list[str]:
+    """Read the event ids listed as pending for the test stream.
+
+    Args:
+        folder: The configured `cost_prediction_path`.
+
+    Returns:
+        Every listed id.
+    """
+    return [
+        event_id
+        for path in sorted((folder / "pending" / "tickets_sold").glob("*"))
+        for event_id in path.read_text().split()
+    ]
+
+
 def test_cost_predictions_are_written_per_request(
     stub_api: StubSolvimonAPI,
     tmp_path: Path,
@@ -684,6 +702,7 @@ def test_cost_predictions_are_written_per_request(
         ("mdat-ticket-0002", "PENDING"),
     ]
     assert all("_sdc_batched_at" in event for event in written)
+    assert pending_ids(tmp_path) == ["mdat-ticket-0002"]
 
 
 def test_predictions_are_written_before_a_later_request_fails(
@@ -714,3 +733,47 @@ def test_s3_paths_get_a_working_s3_session(stub_api: StubSolvimonAPI) -> None:
 
     assert isinstance(sink.prediction_fs, S3FileSystem)
     sink.prediction_fs.connect()
+
+
+def test_pending_predictions_are_looked_up_at_the_end_of_the_run(
+    stub_api: StubSolvimonAPI,
+    tmp_path: Path,
+) -> None:
+    """Pending events are looked up by Solvimon's id; only final predictions are stored."""
+    sink = build_sink(stub_api, cost_prediction_path=str(tmp_path), derive_event_id=False)
+    stub_api.pend_predictions("mdat-ticket-0001", "mdat-ticket-0002")
+    send(sink, [{"reference": "ticket-0001"}, {"reference": "ticket-0002"}])
+    (tmp_path / "pending" / "tickets_sold" / "0-earlier-run.txt").write_text("mdat-gone")
+    stub_api.settle_predictions("mdat-ticket-0001")
+
+    sink.clean_up()
+
+    assert sorted(stub_api.looked_up_ids) == ["mdat-gone", "mdat-ticket-0001", "mdat-ticket-0002"]
+    _, looked_up = read_predictions(tmp_path)
+    assert [(event["id"], event["cost_prediction"]["status"]) for event in looked_up] == [
+        ("mdat-ticket-0001", "READY")
+    ]
+    assert pending_ids(tmp_path) == ["mdat-ticket-0002"]
+
+
+def test_stream_names_stay_inside_the_pending_folder(
+    stub_api: StubSolvimonAPI,
+    tmp_path: Path,
+) -> None:
+    """A stream name can't point the pending lists, which get deleted, at another folder."""
+    sink = build_sink(stub_api, cost_prediction_path=str(tmp_path), stream_name="../../etc")
+
+    assert sink.pending_dir == f"{tmp_path}/pending/______etc"
+
+
+def test_without_a_cost_prediction_path_nothing_is_looked_up(
+    stub_api: StubSolvimonAPI,
+) -> None:
+    """The batch endpoint stays in use and the run ends without lookups."""
+    sink = build_sink(stub_api)
+
+    send(sink, [{"id": "evt-1"}])
+    sink.clean_up()
+
+    assert [request.path for request in stub_api.requests] == [INGEST_PATH]
+    assert stub_api.looked_up_ids == []

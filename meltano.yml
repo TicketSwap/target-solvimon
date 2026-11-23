@@ -160,7 +160,7 @@ plugins:
     - name: cost_prediction_path
       kind: string
       label: Cost Prediction Path
-      description: Folder to write Solvimon's cost prediction of every ingested event to, e.g. `s3://bucket/solvimon/cost_prediction` (S3 needs the `s3` extra). Setting it ingests through `/v1/ingest/meter-datas?cost_prediction=true` instead of the batch endpoint of `api_version`, and writes each accepted request as one gzipped JSON lines file under `predictions/`, stamped with `_sdc_batched_at`.
+      description: Folder to write Solvimon's cost prediction of every ingested event to, e.g. `s3://bucket/solvimon/cost_prediction` (S3 needs the `s3` extra). Setting it ingests through `/v1/ingest/meter-datas?cost_prediction=true` instead of the batch endpoint of `api_version`, and writes each accepted request as one gzipped JSON lines file under `predictions/`, stamped with `_sdc_batched_at`. Events whose prediction is `PENDING` are listed under `pending/<stream>/` and looked up again at the end of every run, which needs `METER_DATA.VIEW`.
 
     settings_group_validation:
     - [api_key]

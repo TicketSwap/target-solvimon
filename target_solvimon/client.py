@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import typing as t
 from http import HTTPStatus
+from urllib.parse import quote
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -31,6 +32,7 @@ INGEST_BATCH_PATHS = {
 }
 INGEST_BATCH_KEYS = {"v1": "meter_datas", "v2": "events"}
 COST_PREDICTION_PATH = "/v1/ingest/meter-datas"
+EVENT_PATH = "/v1/ingest/meter-data"
 # Soft-deletes the event with a reference, so the reference can be ingested again.
 DELETE_EVENT_PATH = "/v1/ingest/meter-data/delete"
 
@@ -119,7 +121,7 @@ class SolvimonClient:
             total=max_retries,
             backoff_factor=backoff_factor,
             status_forcelist=RETRYABLE_STATUS_CODES,
-            allowed_methods=frozenset({"POST"}),
+            allowed_methods=frozenset({"GET", "POST"}),
             respect_retry_after_header=True,
             raise_on_status=False,
         )
@@ -217,6 +219,34 @@ class SolvimonClient:
             )
             raise FatalAPIError(msg)
         return True
+
+    def get_event(self, event_id: str) -> dict | None:
+        """Fetch one event, with the cost prediction Solvimon stored for it.
+
+        Args:
+            event_id: Solvimon id or reference of the event.
+
+        Returns:
+            The event, or None if Solvimon has no event with that id.
+
+        Raises:
+            FatalAPIError: If the API refused the lookup, or kept failing after all
+                retries were exhausted.
+        """
+        response = self.session.get(
+            f"{self.api_url}{EVENT_PATH}/{quote(event_id, safe='')}",
+            timeout=self.timeout,
+        )
+        if response.status_code == HTTPStatus.NOT_FOUND and MISSING_EVENT_ERROR in response.text:
+            return None
+        if not response.ok:
+            detail = response.text[:ERROR_BODY_MAX_CHARS].strip()
+            msg = (
+                f"Solvimon refused to look up event '{event_id}': "
+                f"{response.status_code} {response.reason}: {detail}"
+            )
+            raise FatalAPIError(msg)
+        return t.cast("dict", response.json())
 
     def close(self) -> None:
         """Release the underlying HTTP connection pool."""
