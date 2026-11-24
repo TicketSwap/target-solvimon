@@ -2,15 +2,10 @@
 
 `target-solvimon` is a Singer target for [Solvimon](https://solvimon.com).
 
-It loads records into Solvimon as metering events through the batch ingest endpoint,
-in batches of up to 1000 events per call.
-
-The target posts to `POST /v1/events/ingest-batch` with the events under a
-`meter_datas` key, and Solvimon answers `201` echoing the created meter data. The
-[`POST /v2/events/ingest-batch`](https://docs.solvimon.com/api-docs/event-api/post-v-2-events-ingest-batch)
-endpoint the docs describe — same events, under an `events` key — currently answers
-`404 Page does not exist` on both `test.api.solvimon.com` and `api.solvimon.com`; set
-`api_version: v2` to use it once it is served.
+It loads records into Solvimon as metering events through
+[`POST /v1/ingest/meter-datas`](https://docs.solvimon.com/api-docs/event-api/ingest/post-ingest-meter-datas),
+up to 1000 events per call under a `meter_datas` key. Solvimon answers `201` echoing
+the created meter data.
 
 What the API enforces, beyond the event shape:
 
@@ -38,7 +33,6 @@ uv tool install git+https://github.com/ticketswap/target-solvimon.git@main
 | Setting | Required | Default | Description |
 |:--------|:--------:|:-------:|:------------|
 | api_key | True | None | Solvimon API key, sent as the `X-API-KEY` header. Needs the `METER_DATA.INGEST` permission. |
-| api_version | False | `v1` | Batch ingest endpoint to call, `v1` or `v2`. |
 | api_url | False | `https://test.api.solvimon.com` | Base URL of the Solvimon API. Defaults to the test environment; use `https://api.solvimon.com` to write billable events. |
 | auth_token | False | None | Bearer token sent as the `Authorization` header, for deployments that require it on top of the API key. |
 | platform_id | False | None | Solvimon platform ID, sent as the `x-platform-id` header. |
@@ -57,6 +51,7 @@ uv tool install git+https://github.com/ticketswap/target-solvimon.git@main
 | meter_values | False | None | Meter values to build per record, keyed by value reference. See below. |
 | action_field | False | None | Record field holding `create` or `replace`. A `replace` deletes the live event with the same `reference` before ingesting. Never sent to Solvimon. |
 | extra_fields | False | `passthrough` | What to do with record fields that are not mapped to `id`, `reference` or `timestamp`: `passthrough`, `meter_properties` or `ignore`. |
+| cost_prediction_path | False | None | Folder to write the cost prediction of every ingested event to, e.g. `s3://bucket/solvimon/cost_prediction`. See below. |
 
 The SDK also provides `batch_size_rows`, `add_record_metadata`, `validate_records`,
 `stream_maps` and schema flattening. A full list of supported settings and
@@ -129,9 +124,8 @@ and a replace of the same reference in order; repeats across batches are applied
 
 ### Batching, retries and failures
 
-Records are buffered per stream and sent in batches of at most 1000 events, the limit
-of the ingest endpoint. Setting `batch_size_rows` above 1000 buffers more records but
-still splits them across requests.
+Records are buffered per stream and sent in requests of at most 1000 events. Setting
+`batch_size_rows` above 1000 buffers more records but still splits them across requests.
 
 Requests that fail with `408`, `425`, `429` or a `5xx` are retried `max_retries` times
 with exponential backoff, honouring `Retry-After`. A batch refused with `400`, `409`,
@@ -140,6 +134,33 @@ the refused events are isolated: each is skipped with a warning carrying the API
 the event, and the rest is ingested. Anything else — auth errors, an unknown endpoint, and
 anything still failing once the retries are used up — fails the sync with the status code
 and the API error body.
+
+### Cost predictions
+
+With `cost_prediction_path` set, the target ingests with `?cost_prediction=true`, and Solvimon
+answers with the predicted cost of each event. The events of every request Solvimon accepts are
+written, as Solvimon returned them plus `_sdc_batched_at`, to one gzipped JSON lines file before
+the next request is sent:
+
+```
+<cost_prediction_path>/predictions/<UTC write time>-<random id>.jsonl.gz
+<cost_prediction_path>/pending/<stream>/<UTC write time>-<random id>.txt
+```
+
+A prediction Solvimon hasn't finished has `cost_prediction.status: PENDING`. Those event ids
+are listed under `pending/<stream>/`, and at the end of every run the target looks each one up
+with `GET /v1/ingest/meter-data/{id}`. Events with a final prediction are written as a new
+`predictions/` file. Events still pending, or whose prediction Solvimon hasn't stored yet, are
+listed again. Events Solvimon no longer has, or has deleted since, are dropped. A stream's
+pending events are only looked up in runs that include that stream, and its folder name keeps
+only letters, digits, `_` and `-`.
+
+When loading, drop rows whose `cost_prediction.status` is `DUPLICATE`, then keep the newest
+row per `reference` by `_sdc_batched_at`. A replayed event comes back as a duplicate, and would
+otherwise replace its original prediction.
+
+The API key also needs `METER_DATA.VIEW`. Install the `s3` extra to write to S3; any other
+[fsspec](https://filesystem-spec.readthedocs.io/) URL, such as a local folder, works too.
 
 ### Configure using environment variables
 

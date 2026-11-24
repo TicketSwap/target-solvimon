@@ -17,10 +17,11 @@ if sys.version_info >= (3, 12):
 else:
     from typing_extensions import override
 
-INGEST_PATH = "/v1/events/ingest-batch"
-INGEST_PATH_V2 = "/v2/events/ingest-batch"
+INGEST_PATH = "/v1/ingest/meter-datas"
+PREDICTION_PATH = f"{INGEST_PATH}?cost_prediction=true"
+EVENT_PATH = "/v1/ingest/meter-data/"
 DELETE_PATH = "/v1/ingest/meter-data/delete"
-EVENTS_KEYS = ("meter_datas", "events")
+EVENTS_KEY = "meter_datas"
 
 ERROR_BODY = {
     "type": "INVALID_REQUEST",
@@ -37,18 +38,6 @@ MISSING_CUSTOMER_BODY = {
     "code": "NOT_FOUND",
     "message": "The requested CUSTOMER could not be found",
 }
-
-
-def events_key(body: dict) -> str:
-    """Return the key a request body carries its events under.
-
-    Args:
-        body: The decoded request body.
-
-    Returns:
-        The wrapper key used by the API version the target called.
-    """
-    return next((key for key in EVENTS_KEYS if key in body), EVENTS_KEYS[0])
 
 
 class StubRequest(t.NamedTuple):
@@ -69,6 +58,9 @@ class StubSolvimonAPI:
         self._statuses: list[int] = []
         self._rejected_ids: set[str] = set()
         self._missing_references: set[str] = set()
+        self._pending_ids: set[str] = set()
+        self._stored: dict[str, dict] = {}
+        self.looked_up_ids: list[str] = []
         self._lock = threading.Lock()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._build_handler())
         self._thread = threading.Thread(
@@ -99,7 +91,7 @@ class StubSolvimonAPI:
             event
             for request in self.requests
             if request.path != DELETE_PATH
-            for event in request.body[events_key(request.body)]
+            for event in request.body[EVENTS_KEY]
         ]
 
     @property
@@ -113,7 +105,7 @@ class StubSolvimonAPI:
             event
             for request in self.requests
             if request.path != DELETE_PATH and request.status < 400
-            for event in request.body[events_key(request.body)]
+            for event in request.body[EVENTS_KEY]
         ]
 
     def reset(self) -> None:
@@ -123,6 +115,32 @@ class StubSolvimonAPI:
             self._statuses.clear()
             self._rejected_ids.clear()
             self._missing_references.clear()
+            self._pending_ids.clear()
+            self._stored.clear()
+            self.looked_up_ids.clear()
+
+    def pend_predictions(self, *event_ids: str) -> None:
+        """Answer these events as `PENDING` on ingest, and without a prediction on lookup.
+
+        Args:
+            event_ids: Ids of the events whose prediction is not final.
+        """
+        with self._lock:
+            self._pending_ids.update(event_ids)
+
+    def settle_predictions(self, *event_ids: str) -> None:
+        """Answer the cost prediction of these events as `READY` from now on.
+
+        Args:
+            event_ids: Ids of the events whose prediction is final.
+        """
+        with self._lock:
+            self._pending_ids.difference_update(event_ids)
+
+    def _meter_data(self, event: dict) -> dict:
+        event_id = event.get("id") or f"mdat-{event['reference']}"
+        status = "PENDING" if event_id in self._pending_ids else "READY"
+        return {**event, "id": event_id, "cost_prediction": {"response": "OK", "status": status}}
 
     @property
     def deleted_references(self) -> list[str]:
@@ -175,7 +193,7 @@ class StubSolvimonAPI:
             if path == DELETE_PATH:
                 status = self._statuses.pop(0) if self._statuses else 200
                 return status, ERROR_BODY if status >= 400 else {}
-            events = body.get(events_key(body), [])
+            events = body.get(EVENTS_KEY, [])
             if any(event.get("id") in self._rejected_ids for event in events):
                 return 404, MISSING_CUSTOMER_BODY
             return (self._statuses.pop(0) if self._statuses else 200), ERROR_BODY
@@ -208,16 +226,31 @@ class StubSolvimonAPI:
 
                 if status >= 400 or self.path == DELETE_PATH:
                     payload = json.dumps(error_body).encode()
+                elif self.path == PREDICTION_PATH:
+                    with stub._lock:
+                        acknowledged = [stub._meter_data(event) for event in body[EVENTS_KEY]]
+                        stub._stored.update({event["id"]: event for event in acknowledged})
+                    payload = json.dumps({EVENTS_KEY: acknowledged}).encode()
                 else:
-                    key = events_key(body)
-                    payload = json.dumps(
-                        {
-                            key: [
-                                {"reference": event.get("reference")} for event in body.get(key, [])
-                            ]
-                        }
-                    ).encode()
+                    acknowledged = [
+                        {"reference": event.get("reference")} for event in body[EVENTS_KEY]
+                    ]
+                    payload = json.dumps({EVENTS_KEY: acknowledged}).encode()
 
+                self._respond(status, payload)
+
+            def do_GET(self) -> None:
+                """Answer an event lookup with the event and its cost prediction."""
+                event_id = self.path.removeprefix(EVENT_PATH)
+                with stub._lock:
+                    stub.looked_up_ids.append(event_id)
+                    event = stub._stored.get(event_id)
+                    body = stub._meter_data(event) if event else MISSING_EVENT_BODY
+                    if event and event_id in stub._pending_ids:
+                        del body["cost_prediction"]
+                self._respond(200 if event else 404, json.dumps(body).encode())
+
+            def _respond(self, status: int, payload: bytes) -> None:
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))

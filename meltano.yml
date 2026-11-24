@@ -53,17 +53,6 @@ plugins:
       description: Base URL of the Solvimon API. Defaults to the test environment; use `https://api.solvimon.com` to write billable events.
       value: https://test.api.solvimon.com
 
-    - name: api_version
-      kind: options
-      label: Ingest API Version
-      description: Version of the batch ingest endpoint to call. `v1` posts `meter_datas` to `/v1/events/ingest-batch`; `v2` posts `events` to `/v2/events/ingest-batch`, which is documented but currently answers 404.
-      value: v1
-      options:
-      - label: v1
-        value: v1
-      - label: v2
-        value: v2
-
     - name: auth_token
       kind: string
       label: Auth Token
@@ -156,6 +145,11 @@ plugins:
         value: meter_properties
       - label: Ignore
         value: ignore
+
+    - name: cost_prediction_path
+      kind: string
+      label: Cost Prediction Path
+      description: Folder to write Solvimon's cost prediction of every ingested event to, e.g. `s3://bucket/solvimon/cost_prediction` (S3 needs the `s3` extra). Setting it asks Solvimon for the predicted cost on ingest (`cost_prediction=true`) and writes each accepted request as one gzipped JSON lines file under `predictions/`, stamped with `_sdc_batched_at`. Events whose prediction is `PENDING` are listed under `pending/<stream>/` and looked up again at the end of every run, which needs `METER_DATA.VIEW`.
 
     settings_group_validation:
     - [api_key]

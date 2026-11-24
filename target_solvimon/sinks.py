@@ -4,20 +4,24 @@ from __future__ import annotations
 
 import datetime as dt
 import decimal
+import gzip
+import re
 import sys
 import typing as t
 import uuid
 
+from fsspec.core import url_to_fs
+from fsspec.utils import get_protocol
 from singer_sdk.exceptions import ConfigValidationError, FatalAPIError
 from singer_sdk.singerlib.json import serialize_json
 from singer_sdk.sinks import BatchSink
 
 from target_solvimon.client import (
     DEFAULT_API_URL,
-    DEFAULT_API_VERSION,
     DEFAULT_BACKOFF_FACTOR,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
+    EVENTS_KEY,
     MAX_EVENTS_PER_REQUEST,
     RejectedEventsError,
     SolvimonClient,
@@ -29,10 +33,16 @@ else:
     from typing_extensions import override
 
 if t.TYPE_CHECKING:
+    from fsspec import AbstractFileSystem
     from singer_sdk.target_base import Target
 
 SDC_PREFIX = "_sdc_"
 EXTRACTED_AT_FIELD = "_sdc_extracted_at"
+BATCHED_AT_FIELD = "_sdc_batched_at"
+
+PREDICTIONS_FOLDER = "predictions"
+PENDING_FOLDER = "pending"
+PENDING_STATUS = "PENDING"
 
 # Fixed namespace for derived event ids: replaying a sync then produces the same ids,
 # so Solvimon deduplicates instead of double-billing.
@@ -149,6 +159,30 @@ def build_meter_value(reference: str, spec: dict, record: dict) -> dict | None:
     return None  # pragma: no cover - the spec is validated on startup
 
 
+def is_pending(event: dict) -> bool:
+    """Return whether Solvimon has not finished the cost prediction of an event.
+
+    Args:
+        event: An event as Solvimon returns it.
+
+    Returns:
+        True when the prediction status is `PENDING`.
+    """
+    return (event.get("cost_prediction") or {}).get("status") == PENDING_STATUS
+
+
+def file_name(suffix: str) -> str:
+    """Return a unique file name that sorts in the order files are written.
+
+    Args:
+        suffix: Extension of the file.
+
+    Returns:
+        The UTC write time followed by a random id.
+    """
+    return f"{dt.datetime.now(tz=dt.UTC):%Y%m%dT%H%M%S%fZ}-{uuid.uuid4().hex}{suffix}"
+
+
 def meter_value_spec_problems(spec: t.Any) -> list[str]:  # noqa: ANN401
     """Describe what is wrong with one `meter_values` entry.
 
@@ -205,16 +239,25 @@ class SolvimonSink(BatchSink):
         """
         super().__init__(target, stream_name, schema, key_properties)
 
+        prediction_path: str | None = self.config.get("cost_prediction_path")
+        self.prediction_fs: AbstractFileSystem | None = None
+        if prediction_path:
+            options = {"auto_mkdir": True} if get_protocol(prediction_path) == "file" else {}
+            self.prediction_fs, root = url_to_fs(prediction_path, **options)
+            self.predictions_dir = f"{root}/{PREDICTIONS_FOLDER}"
+            folder = re.sub(r"[^\w-]", "_", stream_name)
+            self.pending_dir = f"{root}/{PENDING_FOLDER}/{folder}"
+
         self.client = SolvimonClient(
             logger=self.logger,
             api_key=self.config["api_key"],
             api_url=self.config.get("api_url", DEFAULT_API_URL),
-            api_version=self.config.get("api_version", DEFAULT_API_VERSION),
             auth_token=self.config.get("auth_token"),
             platform_id=self.config.get("platform_id"),
             timeout=self.config.get("timeout", DEFAULT_TIMEOUT),
             max_retries=self.config.get("max_retries", DEFAULT_MAX_RETRIES),
             backoff_factor=self.config.get("backoff_factor", DEFAULT_BACKOFF_FACTOR),
+            cost_prediction=self.prediction_fs is not None,
         )
 
         self.id_field: str = self.config.get("event_id_field", DEFAULT_ID_FIELD)
@@ -337,7 +380,9 @@ class SolvimonSink(BatchSink):
         """Send events, skipping only the ones Solvimon refuses.
 
         A refused batch is split in half and each half resent, until every refused
-        event is isolated and reported with a warning.
+        event is isolated and reported with a warning. The cost predictions of every
+        accepted request are stored before the next request is sent, so a later
+        failure can't lose them.
 
         Args:
             events: At most :data:`MAX_EVENTS_PER_REQUEST` events.
@@ -371,7 +416,7 @@ class SolvimonSink(BatchSink):
             self.ingest(events[middle:], deleted)
             return
 
-        acknowledged = response.get(self.client.events_key)
+        acknowledged = response.get(EVENTS_KEY)
         if acknowledged is not None and len(acknowledged) != len(events):
             self.logger.warning(
                 "Solvimon acknowledged %d of the %d events sent for stream '%s'",
@@ -384,11 +429,80 @@ class SolvimonSink(BatchSink):
             len(events),
             self.stream_name,
         )
+        self.store_predictions(acknowledged or [])
+
+    def store_predictions(self, events: list[dict]) -> None:
+        """Write the events of one accepted request with their cost prediction, in one file.
+
+        Pending ones are also listed, to be looked up again at the end of the run. Every
+        event is stamped with `_sdc_batched_at`, so the newest row per event wins however
+        the files are loaded.
+
+        Args:
+            events: Events as Solvimon returned them.
+        """
+        if self.prediction_fs is None or not events:
+            return
+        batched_at = dt.datetime.now(tz=dt.UTC).isoformat()
+        lines = "".join(
+            serialize_json({**event, BATCHED_AT_FIELD: batched_at}) + "\n" for event in events
+        )
+        self.prediction_fs.pipe_file(
+            f"{self.predictions_dir}/{file_name('.jsonl.gz')}",
+            gzip.compress(lines.encode()),
+        )
+        self.list_pending([event for event in events if is_pending(event)])
+
+    def list_pending(self, events: list[dict]) -> None:
+        """List events to look up again at the end of the run.
+
+        Args:
+            events: Events as Solvimon returned them.
+        """
+        if self.prediction_fs is None or not events:
+            return
+        self.prediction_fs.pipe_file(
+            f"{self.pending_dir}/{file_name('.txt')}",
+            "\n".join(event.get("id") or event["reference"] for event in events).encode(),
+        )
+
+    def recheck_pending_predictions(self) -> None:
+        """Look up the events whose cost prediction was pending, and store the result.
+
+        Only events with a final prediction are stored. Events still pending, or whose
+        prediction Solvimon hasn't stored yet, are listed again for the next run. Events
+        Solvimon no longer has, or has deleted since, are dropped.
+        """
+        if self.prediction_fs is None:
+            return
+        listed = self.prediction_fs.glob(f"{self.pending_dir}/*")
+        if not listed:
+            return
+        event_ids = sorted(
+            {line for path in listed for line in self.prediction_fs.cat_file(path).decode().split()}
+        )
+        found = (self.client.get_event(event_id) for event_id in event_ids)
+        settled: list[dict] = []
+        waiting: list[dict] = []
+        for event in found:
+            if event and not event.get("deleted"):
+                waiting_for_it = not event.get("cost_prediction") or is_pending(event)
+                (waiting if waiting_for_it else settled).append(event)
+        self.store_predictions(settled)
+        self.list_pending(waiting)
+        self.prediction_fs.rm(listed)
+        self.logger.info(
+            "Looked up %d pending cost predictions of stream '%s': %d still pending",
+            len(event_ids),
+            self.stream_name,
+            len(waiting),
+        )
 
     @override
     def clean_up(self) -> None:
-        """Close the HTTP session once the stream is fully drained."""
+        """Look up pending cost predictions, then close the HTTP session."""
         super().clean_up()
+        self.recheck_pending_predictions()
         self.client.close()
 
     def build_event(self, record: dict) -> dict:
@@ -398,7 +512,7 @@ class SolvimonSink(BatchSink):
             record: Individual record in the stream.
 
         Returns:
-            An event object accepted by ``POST /v2/events/ingest-batch``.
+            An event object accepted by ``POST /v1/ingest/meter-datas``.
         """
         event: dict[str, t.Any] = {}
         event_id = self.event_id(record)
